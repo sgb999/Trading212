@@ -150,9 +150,9 @@ class SyncTradingAccount implements ShouldBeUnique, ShouldQueue
             'content' => sprintf(
                 'Trading 212 sync failed %d times in a row for account "%s" (#%d). Last error: %s',
                 $consecutiveFailures,
-                $this->tradingAccount->name,
+                DiscordWebhook::escapeMarkdown((string) $this->tradingAccount->name),
                 $this->tradingAccount->getKey(),
-                $exception === null ? 'unknown' : mb_substr($exception->getMessage(), 0, 500),
+                $exception === null ? 'unknown' : DiscordWebhook::escapeMarkdown(mb_substr($exception->getMessage(), 0, 500)),
             ),
         ]);
     }

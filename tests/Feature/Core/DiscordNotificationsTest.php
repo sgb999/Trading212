@@ -6,14 +6,21 @@ use App\Enums\OrderSide;
 use App\Enums\OrderType;
 use App\Enums\Permission;
 use App\Enums\TradeOrderStatus;
+use App\Events\OrderPlaced;
 use App\Jobs\SyncTradingAccount;
 use App\Listeners\SendOrderPlacedDiscordNotification;
 use App\Models\AiAgent;
 use App\Models\Role;
+use App\Models\TradeOrder;
 use App\Models\TradingAccount;
+use App\Services\Discord\DiscordWebhook;
+use GuzzleHttp\Exception\ConnectException;
+use GuzzleHttp\Psr7\Request as PsrRequest;
 use Illuminate\Events\CallQueuedListener;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 
 const DISCORD_TEST_WEBHOOK = 'https://discord.com/api/webhooks/123/secret-token';
@@ -121,7 +128,7 @@ test('an agent order posts ticker, side, quantity, price, status and the agent n
     Http::assertSent(fn (Request $request) => $request->url() === DISCORD_TEST_WEBHOOK
         && $request->method() === 'POST'
         && discordFieldsOf($request) === [
-            'Ticker' => 'VUSAl_EQ',
+            'Ticker' => 'VUSAl\\_EQ',
             'Side' => 'BUY',
             'Quantity' => '1.5',
             'Price' => 'Limit 92.25',
@@ -269,4 +276,111 @@ test('no sync alert is sent when no webhook url is configured', function () {
     discordRunSyncs($account, 3);
 
     Http::assertNotSent(fn (Request $request) => str_contains($request->url(), 'discord.com'));
+});
+
+test('the webhook token never reaches the logs when the request fails', function (string $leakedForm) {
+    config(['services.discord.webhook_url' => DISCORD_TEST_WEBHOOK]);
+    Http::fake(['discord.com/*' => fn () => throw new ConnectException(
+        "cURL error 7: Failed to connect for {$leakedForm}",
+        new PsrRequest('POST', DISCORD_TEST_WEBHOOK),
+    )]);
+    Log::spy();
+
+    expect(app(DiscordWebhook::class)->send(['content' => 'hi']))->toBeFalse();
+
+    Log::shouldHaveReceived('warning')->once()->withArgs(
+        fn (string $message, array $context) => ! str_contains(json_encode([$message, $context]), 'secret-token')
+            && $context['exception'] === ConnectionException::class,
+    );
+})->with([
+    'plain url' => DISCORD_TEST_WEBHOOK,
+    'url-encoded url' => rawurlencode(DISCORD_TEST_WEBHOOK),
+    'bare path' => '/api/webhooks/123/secret-token',
+]);
+
+test('the webhook token never reaches the logs when discord rejects the message', function () {
+    config(['services.discord.webhook_url' => DISCORD_TEST_WEBHOOK]);
+    Http::fake(['discord.com/*' => Http::response(['message' => 'Bad webhook '.DISCORD_TEST_WEBHOOK], 400)]);
+    Log::spy();
+
+    app(DiscordWebhook::class)->send(['content' => 'hi']);
+
+    Log::shouldHaveReceived('warning')->once()->withArgs(
+        fn (string $message, array $context) => ! str_contains(json_encode([$message, $context]), 'secret-token'),
+    );
+});
+
+test('mentions are always disabled even when the payload tries to enable them', function () {
+    config(['services.discord.webhook_url' => DISCORD_TEST_WEBHOOK]);
+    Http::fake(['discord.com/*' => Http::response(status: 204)]);
+
+    app(DiscordWebhook::class)->send([
+        'content' => '@everyone',
+        'allowed_mentions' => ['parse' => ['everyone', 'roles', 'users']],
+    ]);
+
+    Http::assertSent(fn (Request $request) => $request['allowed_mentions'] === ['parse' => []]);
+});
+
+test('a hostile agent name is escaped and cannot ping or link', function () {
+    config(['services.discord.webhook_url' => DISCORD_TEST_WEBHOOK]);
+    discordFakeOrderEndpoints();
+    $account = TradingAccount::factory()->create();
+    $agent = discordAgentFor($account, '@everyone [x](https://evil)');
+
+    app(PlaceOrder::class)->handle(
+        $account,
+        new OrderRequest(ticker: 'AAPL_US_EQ', type: OrderType::Market, side: OrderSide::Buy, quantity: 1),
+        $agent,
+    );
+
+    Http::assertSent(fn (Request $request) => $request->url() === DISCORD_TEST_WEBHOOK
+        && $request['allowed_mentions'] === ['parse' => []]
+        && discordFieldsOf($request)['Placed by'] === 'Agent: @everyone \[x\]\(https://evil\)');
+});
+
+test('an empty field value is replaced with a placeholder', function () {
+    config(['services.discord.webhook_url' => DISCORD_TEST_WEBHOOK]);
+    discordFakeOrderEndpoints();
+    $account = TradingAccount::factory()->create();
+    $account->user->update(['name' => '']);
+
+    app(PlaceOrder::class)->handle(
+        $account,
+        new OrderRequest(ticker: 'AAPL_US_EQ', type: OrderType::Market, side: OrderSide::Buy, quantity: 1),
+        $account->user,
+    );
+
+    Http::assertSent(fn (Request $request) => $request->url() === DISCORD_TEST_WEBHOOK
+        && collect($request['embeds'][0]['fields'])->every(fn (array $field) => $field['value'] !== ''));
+});
+
+test('a listener failure while building the message is logged, not thrown', function () {
+    config(['services.discord.webhook_url' => DISCORD_TEST_WEBHOOK]);
+    $this->mock(DiscordWebhook::class, function ($mock) {
+        $mock->shouldReceive('send')->andThrow(new RuntimeException('boom'));
+    });
+    Log::spy();
+    $account = TradingAccount::factory()->create();
+    $tradeOrder = TradeOrder::factory()->for($account)->create();
+
+    app(SendOrderPlacedDiscordNotification::class)->handle(new OrderPlaced($tradeOrder));
+
+    Log::shouldHaveReceived('warning')->once()->withArgs(
+        fn (string $message, array $context) => $context['exception'] === RuntimeException::class,
+    );
+});
+
+test('the sync failure alert escapes markdown in the account name and error', function () {
+    config(['services.discord.webhook_url' => DISCORD_TEST_WEBHOOK]);
+    Http::fake(['discord.com/*' => Http::response(status: 204)]);
+    $account = TradingAccount::factory()->create(['name' => '**ISA**']);
+    $job = new SyncTradingAccount($account);
+
+    foreach (range(1, SyncTradingAccount::FAILURE_ALERT_THRESHOLD) as $ignored) {
+        $job->failed(new RuntimeException('see [here](https://evil)'));
+    }
+
+    Http::assertSent(fn (Request $request) => str_contains($request['content'], '"\*\*ISA\*\*"')
+        && str_contains($request['content'], 'see \[here\]\(https://evil\)'));
 });

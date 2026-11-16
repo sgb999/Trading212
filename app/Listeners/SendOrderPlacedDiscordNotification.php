@@ -8,6 +8,8 @@ use App\Models\TradeOrder;
 use App\Models\User;
 use App\Services\Discord\DiscordWebhook;
 use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * Posts every placed order (ticker, side, quantity, price, status and who placed it) to Discord.
@@ -19,6 +21,11 @@ class SendOrderPlacedDiscordNotification implements ShouldQueue
      */
     public int $tries = 1;
 
+    /**
+     * Discord rejects embeds with an empty field value.
+     */
+    private const string EMPTY_FIELD_VALUE = '—';
+
     public function __construct(private readonly DiscordWebhook $discord) {}
 
     /**
@@ -29,23 +36,49 @@ class SendOrderPlacedDiscordNotification implements ShouldQueue
         return $this->discord->isConfigured();
     }
 
+    /**
+     * Never throws: under the `sync` queue this runs inside OrderPlaced::dispatch, and an
+     * exception there would look like a failed placement and invite a duplicate retry.
+     */
     public function handle(OrderPlaced $event): void
     {
-        $order = $event->tradeOrder->loadMissing('placedBy');
+        try {
+            $this->discord->send($this->payload($event->tradeOrder->loadMissing('placedBy')));
+        } catch (Throwable $e) {
+            Log::warning('Discord order notification could not be built or sent.', [
+                'trade_order_id' => $event->tradeOrder->getKey(),
+                'exception' => $e::class,
+            ]);
+        }
+    }
 
-        $this->discord->send([
+    /**
+     * @return array{embeds: list<array{title: string, fields: list<array{name: string, value: string, inline: bool}>}>}
+     */
+    private function payload(TradeOrder $order): array
+    {
+        $fields = [
+            'Ticker' => $order->ticker,
+            'Side' => $order->side->value,
+            'Quantity' => $this->formatNumber($order->quantity),
+            'Price' => $this->price($order),
+            'Status' => $order->status->value,
+            'Placed by' => $this->placedBy($order),
+        ];
+
+        return [
             'embeds' => [[
-                'title' => sprintf('Order placed: %s %s', $order->side->value, $order->ticker),
-                'fields' => [
-                    ['name' => 'Ticker', 'value' => $order->ticker, 'inline' => true],
-                    ['name' => 'Side', 'value' => $order->side->value, 'inline' => true],
-                    ['name' => 'Quantity', 'value' => $this->formatNumber($order->quantity), 'inline' => true],
-                    ['name' => 'Price', 'value' => $this->price($order), 'inline' => true],
-                    ['name' => 'Status', 'value' => $order->status->value, 'inline' => true],
-                    ['name' => 'Placed by', 'value' => $this->placedBy($order), 'inline' => true],
-                ],
+                'title' => DiscordWebhook::escapeMarkdown(sprintf('Order placed: %s %s', $order->side->value, $order->ticker)),
+                'fields' => collect($fields)
+                    ->map(fn (?string $value, string $name): array => [
+                        'name' => $name,
+                        'value' => filled($value) ? DiscordWebhook::escapeMarkdown($value) : self::EMPTY_FIELD_VALUE,
+                        'inline' => true,
+                    ])
+                    ->values()
+                    ->all(),
             ]],
-        ]);
+        ];
     }
 
     /**

@@ -1,0 +1,54 @@
+<?php
+
+namespace App\Mcp\Tools;
+
+use App\Enums\Permission;
+use App\Models\AiAgent;
+use App\Models\TradingAccount;
+use Illuminate\Contracts\JsonSchema\JsonSchema;
+use Laravel\Mcp\Request;
+use Laravel\Mcp\Response;
+use Laravel\Mcp\ResponseFactory;
+use Laravel\Mcp\Server\Attributes\Description;
+use Laravel\Mcp\Server\Attributes\Name;
+use Laravel\Mcp\Server\Tools\Annotations\IsIdempotent;
+use Laravel\Mcp\Server\Tools\Annotations\IsReadOnly;
+
+#[Name('get-transactions')]
+#[Description(
+    'Get cash movements (deposits, withdrawals, fees, transfers), newest first. '
+    .'Paginated: pass the returned next_cursor as cursor to fetch the next page (null = no more pages).'
+)]
+#[IsReadOnly]
+#[IsIdempotent]
+class GetTransactionsTool extends TradingTool
+{
+    protected function requiredPermissions(): array
+    {
+        return [Permission::ViewHistory];
+    }
+
+    protected function toolSchema(JsonSchema $schema): array
+    {
+        return [
+            'cursor' => $schema->string()->description('Pagination cursor from a previous call (next_cursor).'),
+            'limit' => $schema->integer()->min(1)->max(50)->default(20)->description('Items per page (1-50).'),
+        ];
+    }
+
+    protected function execute(Request $request, AiAgent $agent, ?TradingAccount $account): Response|ResponseFactory
+    {
+        $validated = $request->validate([
+            'cursor' => ['nullable', 'string', 'max:255'],
+            'limit' => ['nullable', 'integer', 'min:1', 'max:50'],
+        ]);
+
+        return Response::structured([
+            'account' => $this->describeAccount($account),
+            ...$this->historyPage($account->client()->transactions(
+                $validated['cursor'] ?? null,
+                (int) ($validated['limit'] ?? 20),
+            )),
+        ]);
+    }
+}

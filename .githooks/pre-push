@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Blocks `git push` unless server (Unit + Feature) and browser tests pass.
+# Bypass in an emergency with: git push --no-verify
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+echo "pre-push: running server tests (Unit + Feature)..."
+php artisan config:clear --quiet
+vendor/bin/pest tests/Unit tests/Feature --compact
+
+echo "pre-push: building assets for browser tests..."
+pnpm run build >/dev/null
+
+echo "pre-push: running browser tests..."
+vendor/bin/pest tests/Browser --compact
+
+echo "pre-push: all tests passed."

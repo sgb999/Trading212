@@ -1,0 +1,94 @@
+<?xml version="1.0"?>
+<ruleset name="Trading Platform"
+         xmlns="http://pmd.sf.net/ruleset/1.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://pmd.sf.net/ruleset/1.0.0 http://pmd.sf.net/ruleset_xml_schema.xsd"
+         xsi:noNamespaceSchemaLocation="http://pmd.sf.net/ruleset_xml_schema.xsd">
+    <description>
+        PHPMD rules tuned for Laravel, Filament and Laravel MCP.
+        Formatting is Pint's job and type checking is Larastan's job; this
+        ruleset only covers complexity, size, naming and unused code.
+        Run: vendor/bin/phpmd analyze app/
+    </description>
+
+    <!--
+        Clean code, minus the rules that fight Laravel:
+        - StaticAccess: facades, Model::query(), Enum::from() are idiomatic.
+        - ElseExpression: style preference, not a defect.
+        - BooleanArgumentFlag: framework signatures use them ($force = false).
+    -->
+    <rule ref="rulesets/cleancode.xml">
+        <exclude name="StaticAccess"/>
+        <exclude name="ElseExpression"/>
+        <exclude name="BooleanArgumentFlag"/>
+    </rule>
+
+    <!--
+        Code size. Filament resources, MCP tools and Eloquent models carry
+        many framework hook methods, so method counts are raised. Complexity
+        limits stay at the defaults: order logic should stay simple.
+    -->
+    <rule ref="rulesets/codesize.xml">
+        <exclude name="TooManyMethods"/>
+        <exclude name="TooManyPublicMethods"/>
+    </rule>
+    <rule ref="rulesets/codesize.xml/TooManyMethods">
+        <properties>
+            <property name="maximum" value="25"/>
+            <property name="ignorepattern" value="(^(set|get|is|has|with|scope))i"/>
+        </properties>
+    </rule>
+    <rule ref="rulesets/codesize.xml/TooManyPublicMethods">
+        <properties>
+            <property name="maximum" value="20"/>
+            <property name="ignorepattern" value="(^(set|get|is|has|with|scope))i"/>
+        </properties>
+    </rule>
+
+    <!--
+        Design. Filament resources and pages import one class per form
+        field, column, filter and action, so the coupling limit is raised
+        from 13. The largest resource sits at ~34; anything above 35 is
+        worth splitting.
+    -->
+    <rule ref="rulesets/design.xml">
+        <exclude name="CouplingBetweenObjects"/>
+    </rule>
+    <rule ref="rulesets/design.xml/CouplingBetweenObjects">
+        <properties>
+            <property name="maximum" value="35"/>
+        </properties>
+    </rule>
+
+    <!--
+        Naming. Allow conventional short names ($id, $e, $to) and longer
+        descriptive names, which the project guidelines ask for.
+    -->
+    <rule ref="rulesets/naming.xml">
+        <exclude name="ShortVariable"/>
+        <exclude name="LongVariable"/>
+        <exclude name="ShortMethodName"/>
+    </rule>
+    <rule ref="rulesets/naming.xml/ShortVariable">
+        <properties>
+            <property name="minimum" value="3"/>
+            <property name="exceptions" value="id,e,i,j,db,to,up,ok,qs"/>
+        </properties>
+    </rule>
+    <rule ref="rulesets/naming.xml/LongVariable">
+        <properties>
+            <property name="maximum" value="35"/>
+        </properties>
+    </rule>
+    <rule ref="rulesets/naming.xml/ShortMethodName">
+        <properties>
+            <property name="minimum" value="3"/>
+            <property name="exceptions" value="up,to,id"/>
+        </properties>
+    </rule>
+
+    <rule ref="rulesets/unusedcode.xml"/>
+
+    <!-- Superglobals: Laravel code should never touch $_GET/$_POST directly. -->
+    <rule ref="rulesets/controversial.xml"/>
+</ruleset>

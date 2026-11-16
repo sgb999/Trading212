@@ -1,0 +1,112 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PHP_VERSION: '8.5'
+  NODE_VERSION: '26'
+  DB_CONNECTION: pgsql
+  DB_HOST: 127.0.0.1
+  DB_PORT: 5432
+  DB_DATABASE: trading_platform_test
+  DB_USERNAME: postgres
+  DB_PASSWORD: postgres
+
+jobs:
+  server:
+    name: Server tests (Unit + Feature)
+    runs-on: ubuntu-slim
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # ubuntu-slim is a container runner with no Docker, so service containers are unavailable.
+      - name: Start PostgreSQL
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql
+          sudo service postgresql start
+          sudo -u postgres psql -c "ALTER USER postgres PASSWORD '${DB_PASSWORD}';"
+          sudo -u postgres createdb "${DB_DATABASE}"
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: pdo_pgsql, pgsql, intl, zip, mbstring, bcmath
+          coverage: none
+
+      - name: Install Composer dependencies
+        uses: ramsey/composer-install@v3
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      - name: Run server tests
+        run: vendor/bin/pest tests/Unit tests/Feature --compact
+
+  browser:
+    name: Browser tests
+    runs-on: ubuntu-slim
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Start PostgreSQL
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql
+          sudo service postgresql start
+          sudo -u postgres psql -c "ALTER USER postgres PASSWORD '${DB_PASSWORD}';"
+          sudo -u postgres createdb "${DB_DATABASE}"
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: pdo_pgsql, pgsql, intl, zip, mbstring, bcmath, sockets
+          coverage: none
+
+      - name: Install Composer dependencies
+        uses: ramsey/composer-install@v3
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Build assets
+        run: pnpm run build
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      - name: Run browser tests
+        run: vendor/bin/pest tests/Browser --compact
+
+      - name: Upload browser screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-screenshots
+          path: tests/Browser/Screenshots
+          if-no-files-found: ignore

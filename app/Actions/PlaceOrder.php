@@ -7,12 +7,14 @@ use App\Enums\TradeOrderStatus;
 use App\Events\OrderPlaced;
 use App\Exceptions\AgentNotAuthorizedException;
 use App\Models\AiAgent;
+use App\Models\Setting;
 use App\Models\TradeOrder;
 use App\Models\TradingAccount;
 use App\Models\User;
 use App\Services\Trading212\Exceptions\OrderInProgressException;
 use App\Services\Trading212\Exceptions\OrderOutcomeUnknownException;
 use App\Services\Trading212\Exceptions\Trading212Exception;
+use Illuminate\Support\Facades\Log;
 use App\Services\Trading212\Exceptions\UnresolvedOrderException;
 use App\Services\Trading212\Trading212Client;
 use Illuminate\Cache\ArrayStore;
@@ -92,6 +94,18 @@ class PlaceOrder
      */
     public function handle(TradingAccount $account, OrderRequest $order, User|AiAgent $actor): TradeOrder
     {
+        if ($actor instanceof AiAgent) {
+            if (Setting::isAgentTradingHalted()) {
+                Log::warning('Agent order denied: AI agent trading is halted by the kill switch.', [
+                    'ai_agent_id' => $actor->getKey(),
+                    'trading_account_id' => $account->getKey(),
+                    'ticker' => $order->ticker,
+                ]);
+
+                throw new AgentNotAuthorizedException('AI agent trading is halted by the global kill switch.');
+            }
+
+            $this->authorizeAgentOrder->handle($actor, $account, $order);
         self::ensureNotInTransaction();
 
         $lock = self::lockFor($account);

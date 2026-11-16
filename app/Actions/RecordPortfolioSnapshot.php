@@ -47,7 +47,7 @@ class RecordPortfolioSnapshot
         $externalAccountId = $this->externalAccountId($summary);
 
         try {
-            $attributes = $this->attributes($account, $summary);
+            $attributes = $this->validatedAttributes($account, $summary);
             $invalidSummary = null;
         } catch (UnexpectedValueException $e) {
             $attributes = null;
@@ -88,12 +88,15 @@ class RecordPortfolioSnapshot
     }
 
     /**
-     * Fails closed: without an id the snapshot cannot be tied to a Trading 212 account, so it could
-     * silently mix values of two accounts into one baseline.
+     * The summary's Trading 212 account id, as an int or a digit string. Fails closed: without an id the
+     * snapshot cannot be tied to a Trading 212 account, so it could silently mix values of two accounts
+     * into one baseline. Also used by {@see AuthorizeAgentOrder} for the loss guards.
      *
      * @param  array<string, mixed>  $summary
+     *
+     * @throws UnexpectedValueException when the id is missing or not a positive integer
      */
-    private function externalAccountId(array $summary): int
+    public function externalAccountId(array $summary): int
     {
         $id = $summary['id'] ?? null;
 
@@ -144,10 +147,15 @@ class RecordPortfolioSnapshot
     }
 
     /**
+     * Validates a summary's amounts and currency, including the totalValue = cash + invested consistency rule.
+     * Also used by {@see AuthorizeAgentOrder} to check the current summary for the loss guards.
+     *
      * @param  array<string, mixed>  $summary
      * @return array{total_value: float, cash: float, invested: float, currency: ?string}
+     *
+     * @throws UnexpectedValueException when the summary is incomplete or implausible
      */
-    private function attributes(TradingAccount $account, array $summary): array
+    public function validatedAttributes(TradingAccount $account, array $summary): array
     {
         $cash = is_array($summary['cash'] ?? null) ? $summary['cash'] : [];
         $investments = is_array($summary['investments'] ?? null) ? $summary['investments'] : [];

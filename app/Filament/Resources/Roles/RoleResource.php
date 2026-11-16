@@ -14,6 +14,7 @@ use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\TagsInput;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
+use Filament\Forms\Components\Toggle;
 use Filament\Resources\Resource;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Utilities\Set;
@@ -135,7 +136,8 @@ class RoleResource extends Resource
                         TagsInput::make('allowed_tickers')
                             ->label('Allowed tickers')
                             ->placeholder('e.g. AAPL_US_EQ')
-                            ->helperText('Restrict trading to these tickers. Empty = any ticker.')
+                            ->helperText('Restrict trading to these tickers. Empty = any ticker, '
+                                .'unless "Only listed tickers" is on.')
                             ->splitKeys(['Tab', ',', ' '])
                             ->dehydrateStateUsing(fn (?array $state): ?array => blank($state)
                                 ? null
@@ -143,6 +145,10 @@ class RoleResource extends Resource
                                     fn (string $ticker): string => strtoupper(trim($ticker)),
                                     $state,
                                 )))
+                            ->columnSpanFull(),
+                        Toggle::make('restrict_to_allowed_tickers')
+                            ->label('Only listed tickers')
+                            ->helperText('When on, an empty ticker list denies every ticker.')
                             ->columnSpanFull(),
                     ]),
             ]);
@@ -182,7 +188,9 @@ class RoleResource extends Resource
                             ? 'daily loss ≤ '.(float) $record->max_daily_loss_percent.'%'
                             : null,
                         $record->min_portfolio_value !== null ? 'value ≥ £'.(float) $record->min_portfolio_value : null,
-                        filled($record->allowed_tickers) ? count($record->allowed_tickers).' tickers' : null,
+                        filled($record->allowed_tickers)
+                            ? count($record->allowed_tickers).' tickers'
+                            : ($record->restrict_to_allowed_tickers ? 'no tickers allowed' : null),
                     ])->filter()->implode(' · ') ?: 'None')
                     ->color('gray'),
                 TextColumn::make('ai_agents_count')

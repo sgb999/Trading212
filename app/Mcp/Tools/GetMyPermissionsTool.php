@@ -75,6 +75,7 @@ class GetMyPermissionsTool extends TradingTool
                     : null,
                 'min_portfolio_value' => $role?->min_portfolio_value !== null ? (float) $role->min_portfolio_value : null,
                 'allowed_tickers' => blank($role?->allowed_tickers) ? null : $role->allowed_tickers,
+                'restrict_to_allowed_tickers' => $role?->restrict_to_allowed_tickers === true,
             ],
         ];
     }

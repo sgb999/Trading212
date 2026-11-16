@@ -14,6 +14,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  *
  * @property list<string> $permissions
  * @property list<string>|null $allowed_tickers
+ * @property bool $restrict_to_allowed_tickers When true, an empty allowed_tickers list denies every ticker.
  */
 #[Fillable([
     'name',
@@ -26,6 +27,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
     'max_daily_loss_percent',
     'min_portfolio_value',
     'allowed_tickers',
+    'restrict_to_allowed_tickers',
 ])]
 class Role extends Model
 {
@@ -37,6 +39,7 @@ class Role extends Model
      */
     protected $attributes = [
         'permissions' => '[]',
+        'restrict_to_allowed_tickers' => false,
     ];
 
     /**
@@ -47,6 +50,7 @@ class Role extends Model
         return [
             'permissions' => 'array',
             'allowed_tickers' => 'array',
+            'restrict_to_allowed_tickers' => 'boolean',
             'max_order_quantity' => 'decimal:8',
             'max_order_value' => 'decimal:2',
             'max_orders_per_day' => 'integer',
@@ -68,10 +72,14 @@ class Role extends Model
         return in_array($permission->value, $this->permissions ?? [], true);
     }
 
+    /**
+     * An empty allowed_tickers list allows any ticker, unless the role restricts trading to the list:
+     * then an empty list denies every ticker (fail closed until the owner fills it in).
+     */
     public function allowsTicker(string $ticker): bool
     {
         if (blank($this->allowed_tickers)) {
-            return true;
+            return ! $this->restrict_to_allowed_tickers;
         }
 
         return in_array(strtoupper($ticker), array_map('strtoupper', $this->allowed_tickers), true);

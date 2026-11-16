@@ -10,9 +10,16 @@ use App\Models\AiAgent;
 use App\Models\TradeOrder;
 use App\Models\TradingAccount;
 use App\Models\User;
+use App\Services\Trading212\Exceptions\OrderInProgressException;
 use App\Services\Trading212\Exceptions\OrderOutcomeUnknownException;
 use App\Services\Trading212\Exceptions\Trading212Exception;
 use App\Services\Trading212\Exceptions\UnresolvedOrderException;
+use App\Services\Trading212\Trading212Client;
+use Illuminate\Cache\Lock;
+use Illuminate\Contracts\Cache\LockProvider;
+use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Support\Facades\Cache;
+use LogicException;
 
 /**
  * Places an order on Trading 212 on behalf of a User or an AiAgent, recording an audit TradeOrder.
@@ -28,24 +35,109 @@ use App\Services\Trading212\Exceptions\UnresolvedOrderException;
  * other unconfirmed order instead of it holding a remote order unclaimed. The result is written only
  * while the row is still `sending`: if the sync already reconciled it during a slow request, its
  * outcome is kept.
+ *
+ * All of the above (the unresolved-ticker check, authorisation, saving the `sending` row, the API
+ * call and the final update) runs under a per-account cache lock, so two concurrent orders cannot
+ * both pass the daily limit, a balance or holdings check, or the unresolved-ticker check before
+ * either is saved. When the lock cannot be taken within {@see self::LOCK_WAIT_SECONDS} the order is
+ * refused, never queued or retried.
+ *
+ * The lock's lifetime ({@see self::lockTtlSeconds()}) covers the worst case of every budgeted API
+ * call, but it can still lapse if a placement makes more calls than budgeted or the process stalls.
+ * Ownership is therefore re-checked after authorisation: if the lock lapsed (another order may have
+ * taken it), this order is refused before its `sending` row is saved or anything is sent. Once the
+ * `sending` row exists it blocks its ticker and counts toward the daily limit without the lock, so a
+ * lapse during the POST cannot let a second order on the same ticker through. It does not protect a
+ * different ticker: a second order on another ticker could then be authorised against an account
+ * summary or positions that do not yet reflect the in-flight order.
  */
 class PlaceOrder
 {
+    /**
+     * Seconds to wait for another order on the same account to finish before refusing this one.
+     */
+    public const int LOCK_WAIT_SECONDS = 5;
+
+    /**
+     * Attempts {@see Trading212Client} makes per API call: the first, plus one retry after a 429.
+     */
+    private const int ATTEMPTS_PER_API_CALL = 2;
+
     public function __construct(private readonly AuthorizeAgentOrder $authorizeAgentOrder) {}
 
     /**
      * @throws AgentNotAuthorizedException
+     * @throws OrderInProgressException
      * @throws UnresolvedOrderException
      * @throws OrderOutcomeUnknownException
      * @throws Trading212Exception
      */
     public function handle(TradingAccount $account, OrderRequest $order, User|AiAgent $actor): TradeOrder
     {
-        $this->ensureNoUnresolvedOrderForTicker($account, $order, $actor);
+        $lock = self::lockFor($account);
 
-        if ($actor instanceof AiAgent) {
-            $this->authorizeAgentOrder->handle($actor, $account, $order);
+        try {
+            return $lock->block(
+                self::LOCK_WAIT_SECONDS,
+                fn (): TradeOrder => $this->authorizeAndPlace($account, $order, $actor, $lock),
+            );
+        } catch (LockTimeoutException) {
+            $this->refuseAsInProgress($actor, OrderInProgressException::message());
         }
+    }
+
+    /**
+     * The cache lock key that serialises order placement on an account.
+     */
+    public static function lockKey(TradingAccount $account): string
+    {
+        return "trade-order:place:account:{$account->getKey()}";
+    }
+
+    /**
+     * The account's order lock on the trading212 cache store, which must support atomic locks.
+     */
+    private static function lockFor(TradingAccount $account): Lock
+    {
+        $store = Cache::store(config('trading212.cache_store'))->getStore();
+        $lock = $store instanceof LockProvider ? $store->lock(self::lockKey($account), self::lockTtlSeconds()) : null;
+
+        if (! $lock instanceof Lock) {
+            throw new LogicException('The trading212 cache store must support atomic locks.');
+        }
+
+        return $lock;
+    }
+
+    /**
+     * Seconds the account lock lives, covering the worst case while it is held:
+     *
+     *     max_api_calls x ATTEMPTS_PER_API_CALL x (max_wait_seconds + timeout) + margin_seconds
+     *
+     * Each API call may wait up to `trading212.max_wait_seconds` for a rate-limit slot and then up
+     * to `trading212.timeout` for the response, on each of its attempts. `trading212.order_lock.
+     * max_api_calls` budgets every call authorisation and placement can make (price, positions,
+     * pending orders and account summary lookups, plus the placement itself), and the margin covers
+     * the database work. With the defaults: 6 x 2 x (10 + 15) + 60 = 360 seconds.
+     */
+    public static function lockTtlSeconds(): int
+    {
+        $secondsPerAttempt = (int) config('trading212.max_wait_seconds') + (int) config('trading212.timeout');
+
+        return (int) config('trading212.order_lock.max_api_calls') * self::ATTEMPTS_PER_API_CALL * $secondsPerAttempt
+            + (int) config('trading212.order_lock.margin_seconds');
+    }
+
+    /**
+     * @throws AgentNotAuthorizedException
+     * @throws OrderInProgressException
+     * @throws UnresolvedOrderException
+     * @throws OrderOutcomeUnknownException
+     * @throws Trading212Exception
+     */
+    private function authorizeAndPlace(TradingAccount $account, OrderRequest $order, User|AiAgent $actor, Lock $lock): TradeOrder
+    {
+        $this->authorizeUnderLock($account, $order, $actor, $lock);
 
         $tradeOrder = new TradeOrder([
             'ticker' => $order->ticker,
@@ -111,6 +203,43 @@ class PlaceOrder
         }
 
         return $tradeOrder;
+    }
+
+    /**
+     * Runs the unresolved-ticker check and, for agents, role authorisation, then confirms the lock
+     * did not lapse meanwhile, so nothing is saved or sent once another order could hold it.
+     *
+     * @throws AgentNotAuthorizedException
+     * @throws OrderInProgressException
+     * @throws UnresolvedOrderException
+     * @throws Trading212Exception
+     */
+    private function authorizeUnderLock(TradingAccount $account, OrderRequest $order, User|AiAgent $actor, Lock $lock): void
+    {
+        $this->ensureNoUnresolvedOrderForTicker($account, $order, $actor);
+
+        if ($actor instanceof AiAgent) {
+            $this->authorizeAgentOrder->handle($actor, $account, $order);
+        }
+
+        if (! $lock->isOwnedByCurrentProcess()) {
+            $this->refuseAsInProgress($actor, OrderInProgressException::lockLapsedMessage());
+        }
+    }
+
+    /**
+     * Agents get an {@see AgentNotAuthorizedException} so the refusal is logged as a denial.
+     *
+     * @throws AgentNotAuthorizedException
+     * @throws OrderInProgressException
+     */
+    private function refuseAsInProgress(User|AiAgent $actor, string $message): never
+    {
+        if ($actor instanceof AiAgent) {
+            throw new AgentNotAuthorizedException($message);
+        }
+
+        throw new OrderInProgressException($message);
     }
 
     /**

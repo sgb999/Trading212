@@ -10,16 +10,21 @@ use App\Models\AiAgent;
 use App\Models\TradeOrder;
 use App\Models\TradingAccount;
 use App\Models\User;
+use App\Services\Trading212\Exceptions\OrderOutcomeUnknownException;
 use App\Services\Trading212\Exceptions\Trading212Exception;
 use App\Services\Trading212\Exceptions\UnresolvedOrderException;
 
 /**
  * Places an order on Trading 212 on behalf of a User or an AiAgent, recording an audit TradeOrder.
  *
- * Orders on a ticker that still has an `unknown` order on the account are refused for every actor,
- * before anything is sent. Agents are then checked against their role. Failed API calls are recorded
- * with status `failed`, or `unknown` when Trading 212 may still have accepted the order (no response
- * or a 5xx), and the exception is re-thrown.
+ * Orders on a ticker that still has an unresolved (`sending` or `unknown`) order on the account are
+ * refused for every actor, before anything is sent. Agents are then checked against their role; a
+ * denial writes no TradeOrder. The TradeOrder is then saved as `sending` before the request goes
+ * out, so an in-flight order (or one whose process died mid-request) already counts toward the daily
+ * limit and blocks its ticker. The result then sets the final status: a rejection is recorded as
+ * `failed` and re-thrown; no response or a 5xx is recorded as `unknown` and re-thrown as an
+ * {@see OrderOutcomeUnknownException}. A success without an order id is also kept `unknown`, so the
+ * sync job matches it like any other unconfirmed order instead of it holding a remote order unclaimed.
  */
 class PlaceOrder
 {
@@ -28,6 +33,7 @@ class PlaceOrder
     /**
      * @throws AgentNotAuthorizedException
      * @throws UnresolvedOrderException
+     * @throws OrderOutcomeUnknownException
      * @throws Trading212Exception
      */
     public function handle(TradingAccount $account, OrderRequest $order, User|AiAgent $actor): TradeOrder
@@ -47,10 +53,11 @@ class PlaceOrder
             'stop_price' => $order->stopPrice,
             'time_validity' => $order->type->value === 'MARKET' ? null : $order->timeValidity,
             'extended_hours' => $order->extendedHours,
-            'status' => TradeOrderStatus::Submitted,
+            'status' => TradeOrderStatus::Sending,
         ]);
         $tradeOrder->tradingAccount()->associate($account);
         $tradeOrder->placedBy()->associate($actor);
+        $tradeOrder->save();
 
         try {
             $response = $account->client()->placeOrder(
@@ -63,21 +70,34 @@ class PlaceOrder
                 extendedHours: $order->extendedHours,
             );
         } catch (Trading212Exception $e) {
+            $outcomeIsUnknown = $e->leavesOutcomeUnknown();
+
             $tradeOrder->fill([
-                'status' => $e->leavesOutcomeUnknown() ? TradeOrderStatus::Unknown : TradeOrderStatus::Failed,
+                'status' => $outcomeIsUnknown ? TradeOrderStatus::Unknown : TradeOrderStatus::Failed,
                 'error' => $e->getMessage(),
                 'response' => $e->body,
             ])->save();
 
+            if ($outcomeIsUnknown) {
+                throw new OrderOutcomeUnknownException($order->ticker, $tradeOrder->getKey(), $e);
+            }
+
             throw $e;
         }
 
+        $externalId = filter_var($response['id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+
         $tradeOrder->fill([
-            'external_id' => $response['id'] ?? null,
+            'external_id' => $externalId === false ? null : $externalId,
             'external_status' => $response['status'] ?? null,
-            'status' => ($response['status'] ?? null) === 'FILLED'
-                ? TradeOrderStatus::Filled
-                : TradeOrderStatus::Submitted,
+            'status' => match (true) {
+                $externalId === false => TradeOrderStatus::Unknown,
+                ($response['status'] ?? null) === 'FILLED' => TradeOrderStatus::Filled,
+                default => TradeOrderStatus::Submitted,
+            },
+            'error' => $externalId === false
+                ? 'Trading 212 accepted the request but returned no order id; it will be matched at the next sync.'
+                : null,
             'response' => $response,
         ])->save();
 
@@ -88,7 +108,7 @@ class PlaceOrder
 
     /**
      * Refuses a new order while an earlier order on the same ticker (compared case-insensitively)
-     * and account has an unknown outcome, so a timed-out order cannot be duplicated by a retry.
+     * and account is still being sent or has an unknown outcome, so it cannot be duplicated by a retry.
      *
      * @throws AgentNotAuthorizedException
      * @throws UnresolvedOrderException
@@ -96,7 +116,7 @@ class PlaceOrder
     private function ensureNoUnresolvedOrderForTicker(TradingAccount $account, OrderRequest $order, User|AiAgent $actor): void
     {
         $hasUnresolvedOrder = $account->tradeOrders()
-            ->where('status', TradeOrderStatus::Unknown)
+            ->whereIn('status', TradeOrderStatus::unresolved())
             ->whereRaw('LOWER(ticker) = LOWER(?)', [$order->ticker])
             ->exists();
 

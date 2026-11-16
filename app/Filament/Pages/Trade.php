@@ -8,6 +8,7 @@ use App\Enums\OrderSide;
 use App\Enums\OrderType;
 use App\Enums\TimeValidity;
 use App\Filament\Concerns\InteractsWithTradingAccount;
+use App\Services\Trading212\Exceptions\OrderOutcomeUnknownException;
 use App\Services\Trading212\Exceptions\Trading212Exception;
 use BackedEnum;
 use Filament\Actions\Action;
@@ -229,6 +230,15 @@ class Trade extends Page
 
         try {
             $tradeOrder = app(PlaceOrder::class)->handle($account, $orderRequest, auth()->user());
+        } catch (OrderOutcomeUnknownException $e) {
+            Notification::make()
+                ->warning()
+                ->title('Order outcome unknown')
+                ->body($e->getMessage())
+                ->persistent()
+                ->send();
+
+            return;
         } catch (Trading212Exception $e) {
             $this->notifyTrading212Failure($e, 'Order rejected by Trading 212');
 

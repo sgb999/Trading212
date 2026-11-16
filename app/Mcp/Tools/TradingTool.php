@@ -8,6 +8,7 @@ use App\Mcp\CurrentAgent;
 use App\Models\AgentActivityLog;
 use App\Models\AiAgent;
 use App\Models\TradingAccount;
+use App\Services\Trading212\Exceptions\OrderOutcomeUnknownException;
 use App\Services\Trading212\Exceptions\RateLimitExceededException;
 use App\Services\Trading212\Exceptions\Trading212Exception;
 use Illuminate\Contracts\JsonSchema\JsonSchema;
@@ -139,13 +140,7 @@ abstract class TradingTool extends Tool
                     'retry_after_seconds' => $e->retryAfter,
                 ]);
         } catch (Trading212Exception $e) {
-            return $this->fail(
-                $agent,
-                $request,
-                $account,
-                AgentActivityLog::OUTCOME_ERROR,
-                "Trading 212 API error: {$e->getMessage()}",
-            );
+            return $this->failTrading212Request($agent, $request, $account, $e);
         } catch (Throwable $e) {
             $this->log(
                 $agent,
@@ -248,6 +243,36 @@ abstract class TradingTool extends Tool
             ->implode(' or ');
 
         return "Role [{$agent->role?->name}] lacks the [{$required}] permission required by [{$this->name()}].";
+    }
+
+    /**
+     * A failed Trading 212 request. An order whose outcome is unknown gets a structured
+     * `order_outcome_unknown` error, so the agent can tell it apart from a rejection.
+     */
+    private function failTrading212Request(
+        AiAgent $agent,
+        Request $request,
+        ?TradingAccount $account,
+        Trading212Exception $exception,
+    ): Response|ResponseFactory {
+        if (! $exception instanceof OrderOutcomeUnknownException) {
+            return $this->fail(
+                $agent,
+                $request,
+                $account,
+                AgentActivityLog::OUTCOME_ERROR,
+                "Trading 212 API error: {$exception->getMessage()}",
+            );
+        }
+
+        $this->log($agent, $request, $account, AgentActivityLog::OUTCOME_ERROR, $exception->getMessage());
+
+        return Response::make([Response::error($exception->getMessage())])
+            ->withStructuredContent([
+                'error' => 'order_outcome_unknown',
+                'local_id' => $exception->tradeOrderId,
+                'ticker' => $exception->ticker,
+            ]);
     }
 
     private function fail(

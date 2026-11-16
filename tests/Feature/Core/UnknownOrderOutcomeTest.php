@@ -10,10 +10,15 @@ use App\Events\OrderPlaced;
 use App\Exceptions\AgentNotAuthorizedException;
 use App\Filament\Pages\Trade;
 use App\Jobs\SyncTradingAccount;
+use App\Mcp\CurrentAgent;
+use App\Mcp\Servers\TradingServer;
+use App\Mcp\Tools\PlaceOrderTool;
+use App\Models\AgentActivityLog;
 use App\Models\AiAgent;
 use App\Models\Role;
 use App\Models\TradeOrder;
 use App\Models\TradingAccount;
+use App\Services\Trading212\Exceptions\OrderOutcomeUnknownException;
 use App\Services\Trading212\Exceptions\RateLimitExceededException;
 use App\Services\Trading212\Exceptions\Trading212Exception;
 use App\Services\Trading212\Exceptions\UnresolvedOrderException;
@@ -117,7 +122,7 @@ describe('placing an order', function () {
         Event::fake([OrderPlaced::class]);
 
         expect(fn () => app(PlaceOrder::class)->handle($account, unknownOutcomeMarketOrder(), $account->user))
-            ->toThrow(Trading212Exception::class, 'Operation timed out');
+            ->toThrow(OrderOutcomeUnknownException::class, 'Operation timed out');
 
         expect(TradeOrder::query()->sole())
             ->status->toBe(TradeOrderStatus::Unknown)
@@ -252,6 +257,139 @@ describe('placing an order', function () {
 
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
     });
+
+    test('the order is saved as sending before the request is sent', function () {
+        $account = TradingAccount::factory()->create();
+        $statusWhileSending = null;
+        Http::fake(['demo.trading212.com/api/v0/equity/orders/market' => function () use (&$statusWhileSending) {
+            $statusWhileSending = TradeOrder::query()->sole()->status;
+
+            return Http::response(['id' => 42, 'status' => 'NEW']);
+        }]);
+
+        $tradeOrder = app(PlaceOrder::class)->handle($account, unknownOutcomeMarketOrder(), $account->user);
+
+        expect($statusWhileSending)->toBe(TradeOrderStatus::Sending)
+            ->and(TradeOrder::query()->sole())
+            ->getKey()->toBe($tradeOrder->getKey())
+            ->status->toBe(TradeOrderStatus::Submitted)
+            ->external_id->toBe(42);
+    });
+
+    test('an agent order denied by its role writes no order', function () {
+        Http::fake();
+        $account = TradingAccount::factory()->create();
+        $agent = unknownOutcomeAgentFor($account, ['max_order_quantity' => 1]);
+
+        expect(fn () => app(PlaceOrder::class)->handle($account, unknownOutcomeMarketOrder(quantity: 5), $agent))
+            ->toThrow(AgentNotAuthorizedException::class, 'exceeds the role');
+
+        expect(TradeOrder::query()->count())->toBe(0);
+        Http::assertNothingSent();
+    });
+
+    test('an order still being sent counts toward the daily limit and blocks its ticker', function () {
+        Http::fake(['demo.trading212.com/api/v0/equity/orders/market' => Http::response(['id' => 1, 'status' => 'NEW'])]);
+        $account = TradingAccount::factory()->create();
+        $limitedAgent = unknownOutcomeAgentFor($account, ['max_orders_per_day' => 1]);
+        unknownOrderFor($account, ['status' => TradeOrderStatus::Sending, 'ticker' => 'MSFT_US_EQ'])
+            ->placedBy()->associate($limitedAgent)->save();
+
+        expect(fn () => app(PlaceOrder::class)->handle($account, unknownOutcomeMarketOrder('AAPL_US_EQ'), $limitedAgent))
+            ->toThrow(AgentNotAuthorizedException::class, 'Daily order limit of 1 reached.')
+            ->and(fn () => app(PlaceOrder::class)->handle($account, unknownOutcomeMarketOrder('MSFT_US_EQ'), $account->user))
+            ->toThrow(UnresolvedOrderException::class, 'still being sent');
+
+        Http::assertNothingSent();
+    });
+
+    test('a success response without an order id is kept unknown for the sync to match', function () {
+        Http::fake(['demo.trading212.com/api/v0/equity/orders/market' => Http::response(['status' => 'NEW'])]);
+        $account = TradingAccount::factory()->create();
+        Event::fake([OrderPlaced::class]);
+
+        $tradeOrder = app(PlaceOrder::class)->handle($account, unknownOutcomeMarketOrder(), $account->user);
+
+        expect($tradeOrder->refresh())
+            ->status->toBe(TradeOrderStatus::Unknown)
+            ->external_id->toBeNull()
+            ->error->toContain('returned no order id');
+        Event::assertDispatched(OrderPlaced::class);
+    });
+
+    test('an unknown order that expires as failed no longer counts toward the daily limit', function () {
+        $this->travelTo(now()->setTime(12, 0));
+        unknownOutcomeFakeSync();
+        $account = TradingAccount::factory()->create();
+        $agent = unknownOutcomeAgentFor($account, ['max_orders_per_day' => 1]);
+        unknownOrderFor($account, ['ticker' => 'MSFT_US_EQ', 'created_at' => now()->subMinutes(31)])
+            ->placedBy()->associate($agent)->save();
+
+        SyncTradingAccount::dispatchSync($account);
+        Http::fake(['demo.trading212.com/api/v0/equity/orders/market' => Http::response(['id' => 77, 'status' => 'NEW'])]);
+        $tradeOrder = app(PlaceOrder::class)->handle($account, unknownOutcomeMarketOrder('AAPL_US_EQ'), $agent);
+
+        expect($tradeOrder->status)->toBe(TradeOrderStatus::Submitted)
+            ->and(TradeOrder::query()->where('ticker', 'MSFT_US_EQ')->sole()->status)->toBe(TradeOrderStatus::Failed);
+    });
+
+    test('the trade page warns that a timed-out order may have been placed', function () {
+        FakesTrading212::fake(overrides: [
+            'demo.trading212.com/api/v0/equity/orders/market*' => fn () => throw new ConnectionException('timed out'),
+        ]);
+        $account = TradingAccount::factory()->default()->create();
+        $this->actingAs($account->user);
+
+        Livewire::test(Trade::class)
+            ->fillForm(['ticker' => 'AAPL_US_EQ', 'side' => 'BUY', 'type' => 'MARKET', 'quantity' => 1])
+            ->callAction('placeOrder')
+            ->assertNotified('Order outcome unknown');
+
+        expect(TradeOrder::query()->sole()->status)->toBe(TradeOrderStatus::Unknown);
+    });
+});
+
+describe('placing an order through MCP', function () {
+    test('a timeout records the order as unknown and tells the agent not to retry', function () {
+        Http::fake(['demo.trading212.com/api/v0/equity/orders/market' => fn () => throw new ConnectionException('timed out')]);
+        $account = TradingAccount::factory()->create();
+        $agent = unknownOutcomeAgentFor($account);
+        app(CurrentAgent::class)->set($agent);
+
+        TradingServer::tool(PlaceOrderTool::class, [
+            'ticker' => 'AAPL_US_EQ',
+            'type' => 'MARKET',
+            'side' => 'BUY',
+            'quantity' => 1,
+        ])
+            ->assertHasErrors(['outcome of the AAPL_US_EQ order is unknown', 'may have been placed', 'next account sync'])
+            ->assertStructuredContentPath('error', 'order_outcome_unknown')
+            ->assertStructuredContentPath('local_id', TradeOrder::query()->sole()->getKey());
+
+        expect(TradeOrder::query()->sole())
+            ->status->toBe(TradeOrderStatus::Unknown)
+            ->placed_by_id->toBe($agent->getKey());
+        $this->assertDatabaseHas(AgentActivityLog::class, [
+            'tool' => 'place-order',
+            'outcome' => AgentActivityLog::OUTCOME_ERROR,
+        ]);
+    });
+
+    test('a quantity with more than 8 decimal places is rejected before sending', function () {
+        Http::fake();
+        $account = TradingAccount::factory()->create();
+        app(CurrentAgent::class)->set(unknownOutcomeAgentFor($account));
+
+        TradingServer::tool(PlaceOrderTool::class, [
+            'ticker' => 'AAPL_US_EQ',
+            'type' => 'MARKET',
+            'side' => 'BUY',
+            'quantity' => '1.123456789',
+        ])->assertHasErrors(['quantity']);
+
+        Http::assertNothingSent();
+        expect(TradeOrder::query()->count())->toBe(0);
+    });
 });
 
 describe('syncing unknown orders', function () {
@@ -350,6 +488,112 @@ describe('syncing unknown orders', function () {
         expect($order->refresh())
             ->status->toBe(TradeOrderStatus::Unknown)
             ->external_id->toBeNull();
+    });
+
+    test('of two matching remote orders the one created closest to the local order wins', function () {
+        unknownOutcomeFakeSync(historyOrders: [
+            unknownOutcomeRemoteOrder(1301, ['createdAt' => now()->addSeconds(40)->toIso8601String()]),
+            unknownOutcomeRemoteOrder(1302, ['createdAt' => now()->addSeconds(10)->toIso8601String()]),
+        ]);
+        $account = TradingAccount::factory()->create();
+        $order = unknownOrderFor($account);
+
+        SyncTradingAccount::dispatchSync($account);
+
+        expect($order->refresh()->external_id)->toBe(1302);
+    });
+
+    test('remote orders with another type or placed outside the API are not matched', function (array $attributes) {
+        unknownOutcomeFakeSync(historyOrders: [unknownOutcomeRemoteOrder(1401, $attributes)]);
+        $account = TradingAccount::factory()->create();
+        $order = unknownOrderFor($account);
+
+        SyncTradingAccount::dispatchSync($account);
+
+        expect($order->refresh()->external_id)->toBeNull();
+    })->with([
+        'other type' => [['type' => 'LIMIT']],
+        'no type' => [['type' => null]],
+        'placed on the web' => [['initiatedFrom' => 'WEB']],
+    ]);
+
+    test('a remote order initiated from the API is matched', function () {
+        unknownOutcomeFakeSync(historyOrders: [unknownOutcomeRemoteOrder(1501, ['initiatedFrom' => 'API'])]);
+        $account = TradingAccount::factory()->create();
+        $order = unknownOrderFor($account);
+
+        SyncTradingAccount::dispatchSync($account);
+
+        expect($order->refresh()->external_id)->toBe(1501);
+    });
+
+    test('a quantity Trading 212 rounded slightly still matches', function () {
+        unknownOutcomeFakeSync(historyOrders: [unknownOutcomeRemoteOrder(1601, ['quantity' => 0.1234])]);
+        $account = TradingAccount::factory()->create();
+        $order = unknownOrderFor($account, ['quantity' => 0.12345678]);
+
+        SyncTradingAccount::dispatchSync($account);
+
+        expect($order->refresh()->external_id)->toBe(1601);
+    });
+
+    test('the match window covers the configured request time plus clock skew', function (int $secondsAfter, bool $matches) {
+        config(['trading212.timeout' => 5, 'trading212.max_wait_seconds' => 5]);
+        unknownOutcomeFakeSync(historyOrders: [
+            unknownOutcomeRemoteOrder(1701, ['createdAt' => now()->addSeconds($secondsAfter)->toIso8601String()]),
+        ]);
+        $account = TradingAccount::factory()->create();
+        $order = unknownOrderFor($account);
+
+        SyncTradingAccount::dispatchSync($account);
+
+        expect($order->refresh()->external_id)->toBe($matches ? 1701 : null);
+    })->with([
+        'skew before the local row' => [-60, true],
+        'before the local row beyond skew' => [-61, false],
+        'at the end of the request time plus skew' => [80, true],
+        'after the request time plus skew' => [81, false],
+    ]);
+
+    test('an order left sending after its request ended is resolved like an unknown order', function () {
+        unknownOutcomeFakeSync(pendingOrders: [unknownOutcomeRemoteOrder(1801)]);
+        $account = TradingAccount::factory()->create();
+        $order = unknownOrderFor($account, [
+            'status' => TradeOrderStatus::Sending,
+            'created_at' => now()->subSeconds(30),
+        ]);
+        config(['trading212.timeout' => 5, 'trading212.max_wait_seconds' => 5]);
+
+        SyncTradingAccount::dispatchSync($account);
+
+        expect($order->refresh())
+            ->external_id->toBe(1801)
+            ->status->toBe(TradeOrderStatus::Submitted);
+    });
+
+    test('an order whose request may still be in flight is left sending', function () {
+        unknownOutcomeFakeSync(pendingOrders: [unknownOutcomeRemoteOrder(1901)]);
+        $account = TradingAccount::factory()->create();
+        $order = unknownOrderFor($account, ['status' => TradeOrderStatus::Sending]);
+
+        SyncTradingAccount::dispatchSync($account);
+
+        expect($order->refresh())
+            ->external_id->toBeNull()
+            ->status->toBe(TradeOrderStatus::Sending);
+    });
+
+    test('an order left sending with no match becomes failed after 30 minutes', function () {
+        unknownOutcomeFakeSync();
+        $account = TradingAccount::factory()->create();
+        $order = unknownOrderFor($account, [
+            'status' => TradeOrderStatus::Sending,
+            'created_at' => now()->subMinutes(31),
+        ]);
+
+        SyncTradingAccount::dispatchSync($account);
+
+        expect($order->refresh()->status)->toBe(TradeOrderStatus::Failed);
     });
 
     test('an unmatched unknown order becomes failed after 30 minutes', function () {

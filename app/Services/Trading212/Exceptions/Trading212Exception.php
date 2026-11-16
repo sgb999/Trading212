@@ -18,6 +18,16 @@ class Trading212Exception extends RuntimeException
         parent::__construct($message, $status);
     }
 
+    /**
+     * Whether a write that raised this exception may still have been carried out by Trading 212:
+     * no response was received at all (status 0: connection error or timeout) or a 5xx gateway or
+     * server error came back. A 4xx or 429 response means the request was rejected.
+     */
+    public function leavesOutcomeUnknown(): bool
+    {
+        return $this->status === 0 || $this->status >= 500;
+    }
+
     public static function fromResponse(string $endpoint, Response $response): self
     {
         $body = $response->json();

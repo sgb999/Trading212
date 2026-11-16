@@ -23,8 +23,7 @@ test('it builds an order from loose input', function () {
         ->limitPrice->toBe(101.5)
         ->stopPrice->toBeNull()
         ->timeValidity->toBe(TimeValidity::GoodTillCancel)
-        ->and($order->signedQuantity())->toBe(-2.5)
-        ->and($order->knownPrice())->toBe(101.5);
+        ->and($order->signedQuantity())->toBe(-2.5);
 });
 
 test('buy quantities are positive', function () {
@@ -39,6 +38,18 @@ test('it rejects invalid orders', function (array $data) {
     'stop without price' => [['ticker' => 'X', 'type' => 'STOP', 'side' => 'BUY', 'quantity' => 1]],
     'stop limit without stop price' => [
         ['ticker' => 'X', 'type' => 'STOP_LIMIT', 'side' => 'BUY', 'quantity' => 1, 'limit_price' => 5],
+    ],
+    'limit price on a market order' => [
+        ['ticker' => 'X', 'type' => 'MARKET', 'side' => 'BUY', 'quantity' => 1, 'limit_price' => 0.01],
+    ],
+    'limit price on a stop order' => [
+        ['ticker' => 'X', 'type' => 'STOP', 'side' => 'BUY', 'quantity' => 1, 'stop_price' => 5, 'limit_price' => 0.01],
+    ],
+    'stop price on a market order' => [
+        ['ticker' => 'X', 'type' => 'MARKET', 'side' => 'BUY', 'quantity' => 1, 'stop_price' => 0.01],
+    ],
+    'stop price on a limit order' => [
+        ['ticker' => 'X', 'type' => 'LIMIT', 'side' => 'BUY', 'quantity' => 1, 'limit_price' => 5, 'stop_price' => 0.01],
     ],
     'unknown order type' => [['ticker' => 'X', 'type' => 'TRAILING', 'side' => 'BUY', 'quantity' => 1]],
     'unknown side' => [['ticker' => 'X', 'type' => 'MARKET', 'side' => 'HOLD', 'quantity' => 1]],

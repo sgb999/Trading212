@@ -237,3 +237,55 @@ test('cancel-order cannot touch an unassigned account', function () {
 
     Http::assertNothingSent();
 });
+
+test('an extended-hours order is denied and logged without an HTTP call', function (mixed $extendedHours) {
+    mcpTrader($this->account);
+
+    TradingServer::tool(PlaceOrderTool::class, [
+        'ticker' => 'AAPL_US_EQ',
+        'type' => 'MARKET',
+        'side' => 'BUY',
+        'quantity' => 1,
+        'extended_hours' => $extendedHours,
+    ])
+        ->assertHasErrors(['Permission denied', 'AI agents may not place extended-hours orders']);
+
+    Http::assertNothingSent();
+    expect(TradeOrder::query()->count())->toBe(0)
+        ->and(AgentActivityLog::query()->sole()->outcome)->toBe(AgentActivityLog::OUTCOME_DENIED);
+})->with([
+    'boolean true' => true,
+    'integer 1' => 1,
+    'string "1"' => '1',
+]);
+
+test('a non-boolean extended_hours value is rejected without an HTTP call', function () {
+    mcpTrader($this->account);
+
+    TradingServer::tool(PlaceOrderTool::class, [
+        'ticker' => 'AAPL_US_EQ',
+        'type' => 'MARKET',
+        'side' => 'BUY',
+        'quantity' => 1,
+        'extended_hours' => 'yes',
+    ])->assertHasErrors();
+
+    Http::assertNothingSent();
+});
+
+test('an order with extended_hours false is placed as before', function () {
+    mcpTrader($this->account);
+    Http::fake(['demo.trading212.com/api/v0/equity/orders/market' => Http::response(['id' => 557, 'status' => 'NEW'])]);
+
+    TradingServer::tool(PlaceOrderTool::class, [
+        'ticker' => 'AAPL_US_EQ',
+        'type' => 'MARKET',
+        'side' => 'BUY',
+        'quantity' => 1,
+        'extended_hours' => false,
+    ])
+        ->assertOk()
+        ->assertStructuredContentPath('order.id', 557);
+
+    Http::assertSent(fn (HttpRequest $request): bool => $request['extendedHours'] === false);
+});

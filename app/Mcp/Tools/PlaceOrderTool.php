@@ -23,7 +23,7 @@ use Laravel\Mcp\Server\Tools\Annotations\IsDestructive;
 #[Description(<<<'TEXT'
     Place a BUY or SELL order on a Trading 212 account.
     Always pass a POSITIVE quantity; use side=SELL to sell (it is sent to Trading 212 as a negative quantity).
-    type: MARKET (executes immediately at market price; extended_hours allowed), LIMIT (requires limit_price),
+    type: MARKET (executes immediately at market price), LIMIT (requires limit_price),
     STOP (requires stop_price), STOP_LIMIT (requires both). Do not send a price the order type does not use.
     limit_price and stop_price are in the INSTRUMENT's currency (see currencyCode from search-instruments):
     LSE shares quoted in GBX are priced in PENCE (412 = £4.12), not pounds.
@@ -33,6 +33,7 @@ use Laravel\Mcp\Server\Tools\Annotations\IsDestructive;
     position for that; otherwise use STOP_LIMIT).
     A SELL may not exceed the shares you can still sell: the held quantity available for trading (excluding pies),
     less the unfilled quantity of open SELL orders on that ticker. Selling an unheld ticker (shorting) is rejected.
+    extended_hours must be false (or omitted): AI agents may not trade outside regular hours.
     time_validity (DAY or GOOD_TILL_CANCEL) applies to non-market orders. On a LIVE account this trades REAL money.
     Your role's permissions and limits (see get-my-permissions) are enforced; violations are rejected and logged.
     TEXT)]
@@ -68,7 +69,7 @@ class PlaceOrderTool extends TradingTool
                 ->description('How long a non-market order stays active.'),
             'extended_hours' => $schema->boolean()
                 ->default(false)
-                ->description('MARKET orders only: allow execution outside regular trading hours.'),
+                ->description('Must be false: AI agents may not place extended-hours orders (they are rejected).'),
         ];
     }
 

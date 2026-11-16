@@ -250,6 +250,10 @@ test('place-order denies a buy past the daily loss limit and still allows a sell
             'cash' => ['availableToTrade' => 30],
             'investments' => ['currentValue' => 150],
         ]),
+        'demo.trading212.com/api/v0/equity/positions' => Http::response([
+            ['instrument' => ['ticker' => 'AAPL_US_EQ'], 'quantity' => 1, 'quantityAvailableForTrading' => 1],
+        ]),
+        'demo.trading212.com/api/v0/equity/orders' => Http::response([]),
         'demo.trading212.com/api/v0/equity/orders/*' => Http::response(['id' => 901, 'status' => 'NEW']),
     ]);
     mcpTrader($this->account, Role::factory()->trader()->withLossGuards(5)->create());

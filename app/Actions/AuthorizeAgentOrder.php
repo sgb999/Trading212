@@ -29,6 +29,7 @@ class AuthorizeAgentOrder
     public function handle(AiAgent $agent, TradingAccount $account, OrderRequest $order): void
     {
         $this->ensureCanAccessAccount($agent, $account);
+        $this->ensureNotExtendedHours($order);
         $this->ensureMayPlaceOrderType($agent, $order);
         $this->ensureMaySell($agent, $order);
         $this->ensureTickerAllowed($agent->role, $order);
@@ -45,6 +46,18 @@ class AuthorizeAgentOrder
     {
         if (! $agent->canAccessAccount($account)) {
             $this->deny("Agent is not allowed to act on account [{$account->name}].");
+        }
+    }
+
+    /**
+     * Agents may only trade during regular hours, when prices are liquid; humans may still opt in.
+     *
+     * @throws AgentNotAuthorizedException
+     */
+    private function ensureNotExtendedHours(OrderRequest $order): void
+    {
+        if ($order->extendedHours) {
+            $this->deny('AI agents may not place extended-hours orders; omit extended_hours or set it to false.');
         }
     }
 

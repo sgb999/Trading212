@@ -21,7 +21,8 @@ cd "$(git rev-parse --show-toplevel)"
 
 echo "pre-push: running server tests (Unit + Feature)..."
 php artisan config:clear --quiet
-vendor/bin/pest tests/Unit tests/Feature --compact
+# No path arguments: phpunit.xml's suites are Unit + Feature, and --parallel rejects multiple paths.
+vendor/bin/pest --parallel --compact --tia
 
 echo "pre-push: building assets for browser tests..."
 pnpm run build >/dev/null

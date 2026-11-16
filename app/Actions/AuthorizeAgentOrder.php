@@ -8,6 +8,7 @@ use App\Enums\Permission;
 use App\Enums\TradeOrderStatus;
 use App\Exceptions\AgentNotAuthorizedException;
 use App\Models\AiAgent;
+use App\Models\PortfolioSnapshot;
 use App\Models\Role;
 use App\Models\TradingAccount;
 use App\Services\Trading212\Exceptions\Trading212Exception;
@@ -29,6 +30,7 @@ class AuthorizeAgentOrder
         $this->ensureWithinMaxQuantity($agent->role, $order);
         $this->ensureWithinMaxValue($agent->role, $account, $order);
         $this->ensureWithinDailyOrderLimit($agent);
+        $this->ensureWithinLossGuards($agent->role, $account, $order);
     }
 
     /**
@@ -122,6 +124,132 @@ class AuthorizeAgentOrder
         if ($ordersToday >= $role->max_orders_per_day) {
             $this->deny("Daily order limit of {$role->max_orders_per_day} reached.");
         }
+    }
+
+    /**
+     * Loss guards on agent BUY orders. SELLs always pass, so an agent can still reduce risk.
+     *
+     * When `max_daily_loss_percent` or `min_portfolio_value` is set, a BUY is denied when:
+     * - there is no portfolio snapshot today (Europe/London, {@see TradingAccount::firstSnapshotToday()});
+     * - a reference snapshot, or the current summary, is not in GBP;
+     * - the current value cannot be fetched or is invalid (fail closed);
+     * - the current value is more than `max_daily_loss_percent` below the day's reference value;
+     * - the current value is below `min_portfolio_value`.
+     *
+     * The reference value is max(first snapshot today, last snapshot before it). When the morning syncs
+     * fail, today's first snapshot may be taken after a drop; the previous day's last snapshot still holds
+     * the higher value, so the drop is not hidden. A drop overnight therefore also counts towards today's loss.
+     *
+     * The current value comes from a fresh account summary, not the latest snapshot: snapshots are
+     * throttled to one every 15 minutes and stop when syncs fail, so the latest one can hide a recent drop.
+     *
+     * Deposits and withdrawals move the total value too: a withdrawal counts as a loss for the rest of the day.
+     *
+     * @throws AgentNotAuthorizedException
+     */
+    private function ensureWithinLossGuards(Role $role, TradingAccount $account, OrderRequest $order): void
+    {
+        $maxLossPercent = $role->max_daily_loss_percent;
+        $minPortfolioValue = $role->min_portfolio_value;
+
+        if ($order->side !== OrderSide::Buy || ($maxLossPercent === null && $minPortfolioValue === null)) {
+            return;
+        }
+
+        $firstSnapshotToday = $account->firstSnapshotToday();
+
+        if ($firstSnapshotToday === null) {
+            $this->deny('Loss guards are set but there is no portfolio snapshot for today (Europe/London) yet, '
+                .'so BUY orders are blocked until the account syncs. SELL orders are still allowed.');
+        }
+
+        $referenceValue = $this->dayReferenceValue($account, $firstSnapshotToday);
+        $currentValue = $this->currentPortfolioValue($account, (int) $firstSnapshotToday->external_account_id);
+        $current = number_format($currentValue, 2, '.', '');
+
+        if ($maxLossPercent !== null) {
+            $floorValue = round($referenceValue * (100 - (float) $maxLossPercent) / 100, 2);
+
+            if ($currentValue < $floorValue) {
+                $lossPercent = number_format(($referenceValue - $currentValue) / $referenceValue * 100, 2, '.', '');
+
+                $this->deny("Portfolio value £{$current} is down {$lossPercent}% from today's reference of £"
+                    .number_format($referenceValue, 2, '.', '')
+                    ." (max daily loss {$maxLossPercent}%, floor £".number_format($floorValue, 2, '.', '')
+                    .'); BUY orders are blocked. SELL orders are still allowed.');
+            }
+        }
+
+        if ($minPortfolioValue !== null && $currentValue < (float) $minPortfolioValue) {
+            $this->deny("Portfolio value £{$current} is below the role's minimum of £{$minPortfolioValue}; "
+                .'BUY orders are blocked. SELL orders are still allowed.');
+        }
+    }
+
+    /**
+     * max(first snapshot today, the last snapshot before it) of the same Trading 212 account, in GBP.
+     * "Before it" needs no day boundary: today's first snapshot is the earliest of the London day.
+     *
+     * @throws AgentNotAuthorizedException
+     */
+    private function dayReferenceValue(TradingAccount $account, PortfolioSnapshot $firstSnapshotToday): float
+    {
+        $previousSnapshot = $account->portfolioSnapshots()
+            ->where('external_account_id', $firstSnapshotToday->external_account_id)
+            ->where('taken_at', '<', $firstSnapshotToday->taken_at)
+            ->latest('taken_at')
+            ->latest('id')
+            ->first();
+
+        $snapshots = array_filter([$firstSnapshotToday, $previousSnapshot]);
+
+        foreach ($snapshots as $snapshot) {
+            if ($snapshot->currency !== 'GBP') {
+                $this->deny("Loss guards compare values in GBP but the portfolio snapshot is in [{$snapshot->currency}]; "
+                    .'BUY orders are blocked.');
+            }
+        }
+
+        return max(array_map(fn (PortfolioSnapshot $snapshot): float => (float) $snapshot->total_value, $snapshots));
+    }
+
+    /**
+     * The account's current total value in GBP from a fresh summary, rounded to pence. Denies when it cannot
+     * be fetched, is not a positive number, is not in GBP, or belongs to another Trading 212 account.
+     *
+     * @throws AgentNotAuthorizedException
+     */
+    private function currentPortfolioValue(TradingAccount $account, int $externalAccountId): float
+    {
+        $failure = 'Loss guards are set but the current portfolio value could not be determined';
+
+        try {
+            $summary = $account->client()->accountSummary(fresh: true);
+        } catch (Trading212Exception $e) {
+            $this->deny("{$failure} ({$e->getMessage()}); BUY orders are blocked.");
+        }
+
+        $totalValue = $summary['totalValue'] ?? null;
+        $currency = $summary['currency'] ?? $account->currency;
+        $summaryAccountId = $summary['id'] ?? null;
+
+        if (! is_numeric($totalValue) || ! is_finite((float) $totalValue) || (float) $totalValue <= 0) {
+            $this->deny("{$failure} (invalid totalValue); BUY orders are blocked.");
+        }
+
+        if ($currency !== 'GBP') {
+            $currencyLabel = is_string($currency) ? $currency : 'unknown';
+
+            $this->deny("Loss guards compare values in GBP but the account summary is in [{$currencyLabel}]; "
+                .'BUY orders are blocked.');
+        }
+
+        if (! is_int($summaryAccountId) || $summaryAccountId !== $externalAccountId) {
+            $this->deny("{$failure} (the summary is for a different Trading 212 account than today's snapshot); "
+                .'BUY orders are blocked.');
+        }
+
+        return round((float) $totalValue, 2);
     }
 
     private function currentPrice(TradingAccount $account, string $ticker): ?float

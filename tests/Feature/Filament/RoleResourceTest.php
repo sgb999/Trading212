@@ -76,6 +76,45 @@ it('updates permissions and clears limits', function () {
         ->and($role->allowsTicker('ANY_TICKER'))->toBeTrue();
 });
 
+it('saves and clears the loss guards', function () {
+    $role = Role::factory()->create();
+
+    Livewire::test(EditRole::class, ['record' => $role->getRouteKey()])
+        ->fillForm(['max_daily_loss_percent' => 2.5, 'min_portfolio_value' => 150])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect($role->refresh())
+        ->max_daily_loss_percent->toBe('2.50')
+        ->min_portfolio_value->toBe('150.00');
+
+    Livewire::test(ListRoles::class)
+        ->assertTableColumnStateSet('limits', 'daily loss ≤ 2.5% · value ≥ £150', $role);
+
+    Livewire::test(EditRole::class, ['record' => $role->getRouteKey()])
+        ->fillForm(['max_daily_loss_percent' => null, 'min_portfolio_value' => null])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect($role->refresh())
+        ->max_daily_loss_percent->toBeNull()
+        ->min_portfolio_value->toBeNull();
+});
+
+it('validates the loss guards', function (array $data, array $errors) {
+    Livewire::test(CreateRole::class)
+        ->fillForm(['name' => 'Guarded', ...$data])
+        ->call('create')
+        ->assertHasFormErrors($errors);
+
+    expect(Role::query()->count())->toBe(0);
+})->with([
+    'percent above 100' => [['max_daily_loss_percent' => 100.01], ['max_daily_loss_percent' => 'max']],
+    'negative percent' => [['max_daily_loss_percent' => -1], ['max_daily_loss_percent' => 'min']],
+    'negative min value' => [['min_portfolio_value' => -0.01], ['min_portfolio_value' => 'min']],
+    'non-numeric percent' => [['max_daily_loss_percent' => 'abc'], ['max_daily_loss_percent' => 'numeric']],
+]);
+
 it('shows the number of agents per role and protects roles in use', function () {
     $used = Role::factory()->create();
     AiAgent::factory()->count(2)->for($used)->create();

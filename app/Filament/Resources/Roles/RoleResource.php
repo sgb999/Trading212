@@ -116,6 +116,21 @@ class RoleResource extends Resource
                             ->label('Max orders per day')
                             ->integer()
                             ->minValue(0),
+                        TextInput::make('max_daily_loss_percent')
+                            ->label('Max daily loss')
+                            ->numeric()
+                            ->minValue(0)
+                            ->maxValue(100)
+                            ->step('any')
+                            ->suffix('%')
+                            ->helperText('Agent BUYs are denied once the account is down more than this today (Europe/London).'),
+                        TextInput::make('min_portfolio_value')
+                            ->label('Min portfolio value')
+                            ->numeric()
+                            ->minValue(0)
+                            ->step('any')
+                            ->prefix('£')
+                            ->helperText('Agent BUYs are denied while the account total value is below this (GBP).'),
                         TagsInput::make('allowed_tickers')
                             ->label('Allowed tickers')
                             ->placeholder('e.g. AAPL_US_EQ')
@@ -162,6 +177,10 @@ class RoleResource extends Resource
                         $record->max_order_quantity !== null ? 'qty ≤ '.(float) $record->max_order_quantity : null,
                         $record->max_order_value !== null ? 'value ≤ '.(float) $record->max_order_value : null,
                         $record->max_orders_per_day !== null ? "{$record->max_orders_per_day}/day" : null,
+                        $record->max_daily_loss_percent !== null
+                            ? 'daily loss ≤ '.(float) $record->max_daily_loss_percent.'%'
+                            : null,
+                        $record->min_portfolio_value !== null ? 'value ≥ £'.(float) $record->min_portfolio_value : null,
                         filled($record->allowed_tickers) ? count($record->allowed_tickers).' tickers' : null,
                     ])->filter()->implode(' · ') ?: 'None')
                     ->color('gray'),

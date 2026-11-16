@@ -19,7 +19,8 @@ use Override;
 #[Name('get-my-permissions')]
 #[Description(
     'Show your agent name, role, granted permissions and trading limits '
-    .'(max quantity / value per order, max orders per day, allowed tickers). '
+    .'(max quantity / value per order, max orders per day, allowed tickers, and the BUY loss guards: '
+    .'max daily loss percent and min portfolio value in GBP). '
     .'Check this before trading to avoid denied requests.'
 )]
 #[IsReadOnly]
@@ -69,6 +70,10 @@ class GetMyPermissionsTool extends TradingTool
                 'max_order_quantity' => $role?->max_order_quantity !== null ? (float) $role->max_order_quantity : null,
                 'max_order_value' => $role?->max_order_value !== null ? (float) $role->max_order_value : null,
                 'max_orders_per_day' => $role?->max_orders_per_day,
+                'max_daily_loss_percent' => $role?->max_daily_loss_percent !== null
+                    ? (float) $role->max_daily_loss_percent
+                    : null,
+                'min_portfolio_value' => $role?->min_portfolio_value !== null ? (float) $role->min_portfolio_value : null,
                 'allowed_tickers' => blank($role?->allowed_tickers) ? null : $role->allowed_tickers,
             ],
         ];

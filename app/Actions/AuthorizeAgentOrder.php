@@ -77,6 +77,10 @@ class AuthorizeAgentOrder
      */
     private function ensureTickerAllowed(Role $role, OrderRequest $order): void
     {
+        if ($role->restrict_to_allowed_tickers && blank($role->allowed_tickers)) {
+            $this->deny("Role [{$role->name}] has no allowed tickers yet, so every ticker is denied.");
+        }
+
         if (! $role->allowsTicker($order->ticker)) {
             $this->deny("Role [{$role->name}] may not trade {$order->ticker}.");
         }

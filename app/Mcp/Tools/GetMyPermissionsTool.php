@@ -21,6 +21,9 @@ use Override;
     'Show your agent name, role, granted permissions and trading limits '
     .'(max quantity / value per order, max orders per day, allowed tickers, and the BUY loss guards: '
     .'max daily loss percent and min portfolio value in GBP). '
+    .'allowed_tickers lists the only tickers you may trade. When restrict_to_allowed_tickers is false, '
+    .'an empty/null allowed_tickers means any ticker; when it is true and allowed_tickers is empty or null, '
+    .'NO ticker is allowed and every order is denied. '
     .'Check this before trading to avoid denied requests.'
 )]
 #[IsReadOnly]
@@ -75,6 +78,7 @@ class GetMyPermissionsTool extends TradingTool
                     : null,
                 'min_portfolio_value' => $role?->min_portfolio_value !== null ? (float) $role->min_portfolio_value : null,
                 'allowed_tickers' => blank($role?->allowed_tickers) ? null : $role->allowed_tickers,
+                'restrict_to_allowed_tickers' => $role?->restrict_to_allowed_tickers === true,
             ],
         ];
     }

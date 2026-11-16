@@ -101,6 +101,21 @@ it('saves and clears the loss guards', function () {
         ->min_portfolio_value->toBeNull();
 });
 
+it('saves the only-listed-tickers switch and shows an empty restricted list as no tickers allowed', function () {
+    $role = Role::factory()->create(['allowed_tickers' => null]);
+
+    Livewire::test(EditRole::class, ['record' => $role->getRouteKey()])
+        ->fillForm(['restrict_to_allowed_tickers' => true])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect($role->refresh()->restrict_to_allowed_tickers)->toBeTrue()
+        ->and($role->allowsTicker('AAPL_US_EQ'))->toBeFalse();
+
+    Livewire::test(ListRoles::class)
+        ->assertTableColumnStateSet('limits', 'no tickers allowed', $role);
+});
+
 it('validates the loss guards', function (array $data, array $errors) {
     Livewire::test(CreateRole::class)
         ->fillForm(['name' => 'Guarded', ...$data])

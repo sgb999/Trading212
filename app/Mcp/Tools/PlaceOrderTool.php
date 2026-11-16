@@ -23,18 +23,23 @@ use Laravel\Mcp\Server\Tools\Annotations\IsDestructive;
 #[Description(<<<'TEXT'
     Place a BUY or SELL order on a Trading 212 account.
     Always pass a POSITIVE quantity; use side=SELL to sell (it is sent to Trading 212 as a negative quantity).
-    type: MARKET (executes immediately at market price; extended_hours allowed), LIMIT (requires limit_price),
+    type: MARKET (executes immediately at market price), LIMIT (requires limit_price),
     STOP (requires stop_price), STOP_LIMIT (requires both). Do not send a price the order type does not use.
     limit_price and stop_price are in the INSTRUMENT's currency (see currencyCode from search-instruments):
     LSE shares quoted in GBX are priced in PENCE (412 = £4.12), not pounds.
-    A role's max order value is in GBP; with one set, only GBP and GBX instruments may be traded, and orders are
-    valued at their worst-case price: MARKET at the held position's current price, LIMIT at the limit,
+    A role's max order value is in GBP and applies to BUY orders only (SELLs are not value-capped); with one set,
+    only GBP and GBX instruments may be bought, and buys are valued at their worst-case price: MARKET at the held position's current price, LIMIT at the limit,
     STOP_LIMIT at the higher of limit and stop, STOP at the higher of stop and current price (STOP needs a held
     position for that; otherwise use STOP_LIMIT).
+    A SELL may not exceed the shares you can still sell: the held quantity available for trading (excluding pies),
+    less the unfilled quantity of open SELL orders on that ticker. Selling an unheld ticker (shorting) is rejected.
+    extended_hours must be false (or omitted): AI agents may not trade outside regular hours.
     time_validity (DAY or GOOD_TILL_CANCEL) applies to non-market orders. On a LIVE account this trades REAL money.
     Your role's permissions and limits (see get-my-permissions) are enforced; violations are rejected and logged.
     If the result is an "order_outcome_unknown" error, the order MAY have been placed: do not place it again.
     It is reconciled at the next account sync; until then new orders for that ticker are refused.
+    If your role has restrict_to_allowed_tickers=true and allowed_tickers is empty or null, no ticker is allowed:
+    every order is denied until the owner adds tickers.
     TEXT)]
 #[IsDestructive]
 class PlaceOrderTool extends TradingTool
@@ -69,7 +74,7 @@ class PlaceOrderTool extends TradingTool
                 ->description('How long a non-market order stays active.'),
             'extended_hours' => $schema->boolean()
                 ->default(false)
-                ->description('MARKET orders only: allow execution outside regular trading hours.'),
+                ->description('Must be false: AI agents may not place extended-hours orders (they are rejected).'),
         ];
     }
 

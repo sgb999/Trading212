@@ -51,6 +51,19 @@ function lossGuardSnapshot(TradingAccount $account, float $totalValue, string $t
 }
 
 /**
+ * Fakes a held VUSA_EQ position with no open orders, so an agent sell passes the sell-within-holdings check.
+ */
+function lossGuardFakeHoldings(): void
+{
+    Http::fake([
+        'demo.trading212.com/api/v0/equity/positions' => Http::response([
+            ['instrument' => ['ticker' => 'VUSA_EQ'], 'quantity' => 1, 'quantityAvailableForTrading' => 1],
+        ]),
+        'demo.trading212.com/api/v0/equity/orders' => Http::response([]),
+    ]);
+}
+
+/**
  * Fakes the account summary (current value) and the order endpoints.
  *
  * @param  array<string, mixed>  $overrides
@@ -216,6 +229,7 @@ test('a sell is never blocked by the loss guards', function (string $scenario) {
     } else {
         Http::fake(['demo.trading212.com/api/v0/equity/orders/*' => Http::response(['id' => 555, 'status' => 'NEW'])]);
     }
+    lossGuardFakeHoldings();
     $agent = lossGuardAgent($this->account, 5, 150);
 
     expect(lossGuardPlace($this->account, $agent, OrderSide::Sell))->toBe(TradeOrderStatus::Submitted);
@@ -339,6 +353,7 @@ test('a buy with no time validity defaults to day and is sent as day', function 
 test('the day-only rule leaves market buys, sells and unguarded roles alone', function (string $scenario) {
     lossGuardSnapshot($this->account, 200, '2026-11-16 08:05');
     lossGuardFakeTrading212(200);
+    lossGuardFakeHoldings();
     $agent = lossGuardAgent($this->account, $scenario === 'unguarded role' ? null : 5);
     $order = new OrderRequest(
         ticker: 'VUSA_EQ',

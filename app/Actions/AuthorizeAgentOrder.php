@@ -83,11 +83,13 @@ class AuthorizeAgentOrder
     }
 
     /**
+     * The max order value caps buys only, so a position that has grown past the cap can still be exited.
+     *
      * @throws AgentNotAuthorizedException
      */
     private function ensureWithinMaxValue(Role $role, TradingAccount $account, OrderRequest $order): void
     {
-        if ($role->max_order_value === null) {
+        if ($role->max_order_value === null || $order->side === OrderSide::Sell) {
             return;
         }
 

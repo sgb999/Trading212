@@ -27,8 +27,8 @@ use Laravel\Mcp\Server\Tools\Annotations\IsDestructive;
     STOP (requires stop_price), STOP_LIMIT (requires both). Do not send a price the order type does not use.
     limit_price and stop_price are in the INSTRUMENT's currency (see currencyCode from search-instruments):
     LSE shares quoted in GBX are priced in PENCE (412 = £4.12), not pounds.
-    A role's max order value is in GBP; with one set, only GBP and GBX instruments may be traded, and orders are
-    valued at their worst-case price: MARKET at the held position's current price, LIMIT at the limit,
+    A role's max order value is in GBP and applies to BUY orders only (SELLs are not value-capped); with one set,
+    only GBP and GBX instruments may be bought, and buys are valued at their worst-case price: MARKET at the held position's current price, LIMIT at the limit,
     STOP_LIMIT at the higher of limit and stop, STOP at the higher of stop and current price (STOP needs a held
     position for that; otherwise use STOP_LIMIT).
     time_validity (DAY or GOOD_TILL_CANCEL) applies to non-market orders. On a LIVE account this trades REAL money.

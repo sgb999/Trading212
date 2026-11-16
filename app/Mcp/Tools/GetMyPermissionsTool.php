@@ -20,7 +20,7 @@ use Override;
 #[Description(
     'Show your agent name, role, granted permissions and trading limits '
     .'(max quantity / value per order, max orders per day, allowed tickers). '
-    .'max_order_value is in GBP (pounds); see max_order_value_currency. '
+    .'max_order_value is in GBP (pounds) and applies to buys only; see max_order_value_currency. '
     .'Check this before trading to avoid denied requests.'
 )]
 #[IsReadOnly]

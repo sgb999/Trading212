@@ -11,7 +11,12 @@ use Tests\TestCase;
 
 pest()->extend(TestCase::class)
     ->use(RefreshDatabase::class)
-    ->in('Feature', 'Browser');
+    ->beforeEach(fn () => $this->withoutVite())
+    ->in('Feature');
+
+pest()->extend(TestCase::class)
+    ->use(RefreshDatabase::class)
+    ->in('Browser');
 
 pest()->extend(TestCase::class)
     ->in('Unit');

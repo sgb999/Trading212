@@ -36,6 +36,13 @@ return [
     ],
 
     /*
+     | Discord webhook for order and sync alerts. Nothing is sent when empty.
+     */
+    'discord' => [
+        'webhook_url' => env('DISCORD_WEBHOOK_URL'),
+    ],
+
+    /*
      | Token of the AI agent the local stdio MCP server (`php artisan mcp:start trading`) acts as.
      */
     'mcp' => [

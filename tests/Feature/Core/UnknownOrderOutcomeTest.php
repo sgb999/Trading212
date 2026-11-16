@@ -1,6 +1,7 @@
 <?php
 
 use App\Actions\PlaceOrder;
+use App\Actions\ReconcileUnknownOrders;
 use App\Data\OrderRequest;
 use App\Enums\OrderSide;
 use App\Enums\OrderType;
@@ -122,7 +123,10 @@ describe('placing an order', function () {
         Event::fake([OrderPlaced::class]);
 
         expect(fn () => app(PlaceOrder::class)->handle($account, unknownOutcomeMarketOrder(), $account->user))
-            ->toThrow(OrderOutcomeUnknownException::class, 'Operation timed out');
+            ->toThrow(function (OrderOutcomeUnknownException $e): void {
+                expect($e->getMessage())->toContain('Operation timed out')
+                    ->and($e->getPrevious())->toBeInstanceOf(Trading212Exception::class);
+            });
 
         expect(TradeOrder::query()->sole())
             ->status->toBe(TradeOrderStatus::Unknown)
@@ -253,7 +257,7 @@ describe('placing an order', function () {
         Livewire::test(Trade::class)
             ->fillForm(['ticker' => 'AAPL_US_EQ', 'side' => 'BUY', 'type' => 'MARKET', 'quantity' => 1])
             ->mountAction('placeOrder')
-            ->assertNotified('Order rejected by Trading 212');
+            ->assertNotified('Order blocked: previous order unresolved');
 
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
     });
@@ -303,14 +307,15 @@ describe('placing an order', function () {
         Http::assertNothingSent();
     });
 
-    test('a success response without an order id is kept unknown for the sync to match', function () {
+    test('a success response without an order id is kept unknown and reported as an unknown outcome', function () {
         Http::fake(['demo.trading212.com/api/v0/equity/orders/market' => Http::response(['status' => 'NEW'])]);
         $account = TradingAccount::factory()->create();
         Event::fake([OrderPlaced::class]);
 
-        $tradeOrder = app(PlaceOrder::class)->handle($account, unknownOutcomeMarketOrder(), $account->user);
+        expect(fn () => app(PlaceOrder::class)->handle($account, unknownOutcomeMarketOrder(), $account->user))
+            ->toThrow(OrderOutcomeUnknownException::class, 'returned no order id');
 
-        expect($tradeOrder->refresh())
+        expect(TradeOrder::query()->sole())
             ->status->toBe(TradeOrderStatus::Unknown)
             ->external_id->toBeNull()
             ->error->toContain('returned no order id');
@@ -347,6 +352,40 @@ describe('placing an order', function () {
 
         expect(TradeOrder::query()->sole()->status)->toBe(TradeOrderStatus::Unknown);
     });
+
+    test('the trade page warns when a success response has no order id', function () {
+        FakesTrading212::fake(overrides: [
+            'demo.trading212.com/api/v0/equity/orders/market*' => Http::response(['status' => 'NEW']),
+        ]);
+        $account = TradingAccount::factory()->default()->create();
+        $this->actingAs($account->user);
+
+        Livewire::test(Trade::class)
+            ->fillForm(['ticker' => 'AAPL_US_EQ', 'side' => 'BUY', 'type' => 'MARKET', 'quantity' => 1])
+            ->callAction('placeOrder')
+            ->assertNotified('Order outcome unknown');
+
+        expect(TradeOrder::query()->sole()->status)->toBe(TradeOrderStatus::Unknown);
+    });
+
+    test('a request that times out after the sync matched its order keeps the sync outcome', function () {
+        config(['trading212.timeout' => 5, 'trading212.max_wait_seconds' => 5]);
+        $account = TradingAccount::factory()->create();
+        Http::fake(['demo.trading212.com/api/v0/equity/orders/market' => function () use ($account) {
+            $remote = unknownOutcomeRemoteOrder(2101, ['quantity' => 1]);
+            $this->travel(21)->seconds();
+            app(ReconcileUnknownOrders::class)->handle($account, $account->client(), [$remote]);
+
+            throw new ConnectionException('timed out');
+        }]);
+
+        expect(fn () => app(PlaceOrder::class)->handle($account, unknownOutcomeMarketOrder(), $account->user))
+            ->toThrow(OrderOutcomeUnknownException::class);
+
+        expect(TradeOrder::query()->sole())
+            ->status->toBe(TradeOrderStatus::Submitted)
+            ->external_id->toBe(2101);
+    });
 });
 
 describe('placing an order through MCP', function () {
@@ -373,6 +412,24 @@ describe('placing an order through MCP', function () {
             'tool' => 'place-order',
             'outcome' => AgentActivityLog::OUTCOME_ERROR,
         ]);
+    });
+
+    test('a success response without an order id tells the agent the outcome is unknown', function () {
+        Http::fake(['demo.trading212.com/api/v0/equity/orders/market' => Http::response(['status' => 'NEW'])]);
+        $account = TradingAccount::factory()->create();
+        app(CurrentAgent::class)->set(unknownOutcomeAgentFor($account));
+
+        TradingServer::tool(PlaceOrderTool::class, [
+            'ticker' => 'AAPL_US_EQ',
+            'type' => 'MARKET',
+            'side' => 'BUY',
+            'quantity' => 1,
+        ])
+            ->assertHasErrors(['returned no order id', 'may have been placed'])
+            ->assertStructuredContentPath('error', 'order_outcome_unknown')
+            ->assertStructuredContentPath('local_id', TradeOrder::query()->sole()->getKey());
+
+        expect(TradeOrder::query()->sole()->status)->toBe(TradeOrderStatus::Unknown);
     });
 
     test('a quantity with more than 8 decimal places is rejected before sending', function () {
@@ -570,6 +627,22 @@ describe('syncing unknown orders', function () {
             ->external_id->toBe(1801)
             ->status->toBe(TradeOrderStatus::Submitted);
     });
+
+    test('an unresolved order that already has an external id is resolved by that id', function (array $pending, array $history, TradeOrderStatus $status) {
+        unknownOutcomeFakeSync(pendingOrders: $pending, historyOrders: $history);
+        $account = TradingAccount::factory()->create();
+        $order = unknownOrderFor($account, ['external_id' => 2201, 'ticker' => 'MSFT_US_EQ']);
+
+        SyncTradingAccount::dispatchSync($account);
+
+        expect($order->refresh())
+            ->external_id->toBe(2201)
+            ->status->toBe($status);
+    })->with([
+        'still pending' => fn () => [[unknownOutcomeRemoteOrder(2201, ['ticker' => 'MSFT_US_EQ'])], [], TradeOrderStatus::Submitted],
+        'filled in the history' => fn () => [[], [unknownOutcomeRemoteOrder(2201, ['ticker' => 'MSFT_US_EQ', 'status' => 'FILLED'])], TradeOrderStatus::Filled],
+        'not found remotely' => fn () => [[], [], TradeOrderStatus::Submitted],
+    ]);
 
     test('an order whose request may still be in flight is left sending', function () {
         unknownOutcomeFakeSync(pendingOrders: [unknownOutcomeRemoteOrder(1901)]);

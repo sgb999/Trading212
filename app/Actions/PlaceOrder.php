@@ -23,8 +23,11 @@ use App\Services\Trading212\Exceptions\UnresolvedOrderException;
  * out, so an in-flight order (or one whose process died mid-request) already counts toward the daily
  * limit and blocks its ticker. The result then sets the final status: a rejection is recorded as
  * `failed` and re-thrown; no response or a 5xx is recorded as `unknown` and re-thrown as an
- * {@see OrderOutcomeUnknownException}. A success without an order id is also kept `unknown`, so the
- * sync job matches it like any other unconfirmed order instead of it holding a remote order unclaimed.
+ * {@see OrderOutcomeUnknownException}. A success without an order id is also kept `unknown` (and
+ * reported through the same exception, after {@see OrderPlaced}), so the sync job matches it like any
+ * other unconfirmed order instead of it holding a remote order unclaimed. The result is written only
+ * while the row is still `sending`: if the sync already reconciled it during a slow request, its
+ * outcome is kept.
  */
 class PlaceOrder
 {
@@ -72,14 +75,14 @@ class PlaceOrder
         } catch (Trading212Exception $e) {
             $outcomeIsUnknown = $e->leavesOutcomeUnknown();
 
-            $tradeOrder->fill([
+            $tradeOrder->updateIfStatusIn([TradeOrderStatus::Sending], [
                 'status' => $outcomeIsUnknown ? TradeOrderStatus::Unknown : TradeOrderStatus::Failed,
                 'error' => $e->getMessage(),
                 'response' => $e->body,
-            ])->save();
+            ]);
 
             if ($outcomeIsUnknown) {
-                throw new OrderOutcomeUnknownException($order->ticker, $tradeOrder->getKey(), $e);
+                throw OrderOutcomeUnknownException::fromRequestFailure($order->ticker, $tradeOrder->getKey(), $e);
             }
 
             throw $e;
@@ -87,7 +90,7 @@ class PlaceOrder
 
         $externalId = filter_var($response['id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
 
-        $tradeOrder->fill([
+        $wasRecorded = $tradeOrder->updateIfStatusIn([TradeOrderStatus::Sending], [
             'external_id' => $externalId === false ? null : $externalId,
             'external_status' => $response['status'] ?? null,
             'status' => match (true) {
@@ -99,9 +102,13 @@ class PlaceOrder
                 ? 'Trading 212 accepted the request but returned no order id; it will be matched at the next sync.'
                 : null,
             'response' => $response,
-        ])->save();
+        ]);
 
         OrderPlaced::dispatch($tradeOrder);
+
+        if ($externalId === false && $wasRecorded) {
+            throw OrderOutcomeUnknownException::missingOrderId($order->ticker, $tradeOrder->getKey(), $response);
+        }
 
         return $tradeOrder;
     }

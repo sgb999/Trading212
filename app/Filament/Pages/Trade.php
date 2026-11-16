@@ -10,6 +10,7 @@ use App\Enums\TimeValidity;
 use App\Filament\Concerns\InteractsWithTradingAccount;
 use App\Services\Trading212\Exceptions\OrderOutcomeUnknownException;
 use App\Services\Trading212\Exceptions\Trading212Exception;
+use App\Services\Trading212\Exceptions\UnresolvedOrderException;
 use BackedEnum;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Select;
@@ -234,6 +235,15 @@ class Trade extends Page
             Notification::make()
                 ->warning()
                 ->title('Order outcome unknown')
+                ->body($e->getMessage())
+                ->persistent()
+                ->send();
+
+            return;
+        } catch (UnresolvedOrderException $e) {
+            Notification::make()
+                ->danger()
+                ->title('Order blocked: previous order unresolved')
                 ->body($e->getMessage())
                 ->persistent()
                 ->send();

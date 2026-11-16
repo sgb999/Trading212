@@ -4,6 +4,7 @@ namespace App\Services\Trading212\Exceptions;
 
 use Illuminate\Http\Client\Response;
 use RuntimeException;
+use Throwable;
 
 /**
  * Raised when the Trading 212 API returns an error response.
@@ -13,9 +14,13 @@ class Trading212Exception extends RuntimeException
     /**
      * @param  array<string, mixed>|null  $body
      */
-    public function __construct(string $message, public readonly int $status = 0, public readonly ?array $body = null)
-    {
-        parent::__construct($message, $status);
+    public function __construct(
+        string $message,
+        public readonly int $status = 0,
+        public readonly ?array $body = null,
+        ?Throwable $previous = null,
+    ) {
+        parent::__construct($message, $status, $previous);
     }
 
     /**

@@ -19,9 +19,11 @@ use Illuminate\Support\Facades\Log;
 /**
  * Resolves an account's orders whose placement outcome is not known (see {@see TradeOrderStatus::Unknown}),
  * and orders left in {@see TradeOrderStatus::Sending} once their request can no longer be in flight.
- * They have no external id, so they are matched against pending orders and one page of order history
- * by ticker, order type, signed quantity, API origin and creation time. One still unmatched by a
+ * Those without an external id are matched against pending orders and one page of order history by
+ * ticker, order type, signed quantity, API origin and creation time. One still unmatched by a
  * successful lookup that covers its time window is marked failed once it is older than 30 minutes.
+ * Those that already have an external id (a late request result overwrote a reconciled row) are
+ * looked up by that id. Every write is skipped if another process resolved the row first.
  * Called by {@see SyncTradingAccount}.
  */
 class ReconcileUnknownOrders
@@ -52,8 +54,7 @@ class ReconcileUnknownOrders
      */
     public function handle(TradingAccount $account, Trading212Client $client, array $pendingOrders): void
     {
-        $unknownOrders = $account->tradeOrders()
-            ->whereNull('external_id')
+        $unresolvedOrders = $account->tradeOrders()
             ->where(fn (Builder $query): Builder => $query
                 ->where('status', TradeOrderStatus::Unknown)
                 ->orWhere(fn (Builder $query): Builder => $query
@@ -63,9 +64,15 @@ class ReconcileUnknownOrders
             ->oldest('id')
             ->get();
 
-        if ($unknownOrders->isEmpty()) {
+        if ($unresolvedOrders->isEmpty()) {
             return;
         }
+
+        [$ordersWithId, $unknownOrders] = $unresolvedOrders->partition(
+            fn (TradeOrder $order): bool => $order->external_id !== null,
+        );
+
+        $ordersWithId = $this->resolveByExternalId($ordersWithId, $pendingOrders);
 
         $claimedIds = $account->tradeOrders()
             ->whereNotNull('external_id')
@@ -73,9 +80,9 @@ class ReconcileUnknownOrders
             ->map(fn (mixed $id): int => (int) $id)
             ->all();
 
-        $unmatched = $this->matchUnknownOrders($unknownOrders, $pendingOrders, $claimedIds);
+        $unmatched = $this->matchUnknownOrders($unknownOrders->values(), $pendingOrders, $claimedIds);
 
-        if ($unmatched->isEmpty()) {
+        if ($unmatched->isEmpty() && $ordersWithId->isEmpty()) {
             return;
         }
 
@@ -96,11 +103,15 @@ class ReconcileUnknownOrders
             ->values()
             ->all();
 
+        foreach ($this->resolveByExternalId($ordersWithId, $historyOrders) as $order) {
+            $this->resolveOrder($order, null);
+        }
+
         $unmatched = $this->matchUnknownOrders($unmatched, $historyOrders, $claimedIds);
 
         foreach ($unmatched as $order) {
             if ($this->shouldExpireUnknownOrder($order, $historyOrders, $history['nextPagePath'] === null)) {
-                $order->update([
+                $order->updateIfStatusIn(TradeOrderStatus::unresolved(), [
                     'status' => TradeOrderStatus::Failed,
                     'error' => 'Trading 212 gave no clear answer when this order was sent, and no matching order '
                         .'was found in its pending orders or order history after '.self::UNKNOWN_ORDER_EXPIRY_MINUTES
@@ -108,6 +119,59 @@ class ReconcileUnknownOrders
                 ]);
             }
         }
+    }
+
+    /**
+     * Resolves unresolved orders that already carry a Trading 212 id (for instance a row a late
+     * request marked `unknown` after it was matched) from the remote order with that id.
+     *
+     * @param  Collection<int, TradeOrder>  $orders
+     * @param  list<array<string, mixed>>  $remoteOrders
+     * @return Collection<int, TradeOrder> The orders whose id is not among the remote orders
+     */
+    private function resolveByExternalId(Collection $orders, array $remoteOrders): Collection
+    {
+        $remoteById = collect($remoteOrders)->keyBy(fn (array $remote): int => (int) ($remote['id'] ?? 0));
+
+        return $orders
+            ->reject(function (TradeOrder $order) use ($remoteById): bool {
+                $remote = $remoteById->get((int) $order->external_id);
+
+                if ($remote === null) {
+                    return false;
+                }
+
+                $this->resolveOrder($order, $remote);
+
+                return true;
+            })
+            ->values();
+    }
+
+    /**
+     * Records the outcome of an unresolved order from its remote order, unless another process
+     * resolved the row first. An order that has a Trading 212 id but was not found remotely is
+     * known to have been accepted, so it becomes `submitted` and the regular sync follows it up.
+     *
+     * @param  array<string, mixed>|null  $remote
+     */
+    private function resolveOrder(TradeOrder $order, ?array $remote): void
+    {
+        $externalStatus = is_string($remote['status'] ?? null) ? $remote['status'] : null;
+
+        $order->updateIfStatusIn(TradeOrderStatus::unresolved(), [
+            ...($remote === null ? [] : [
+                'external_id' => (int) $remote['id'],
+                'external_status' => $externalStatus,
+                'response' => $remote,
+            ]),
+            'status' => match ($externalStatus) {
+                'FILLED' => TradeOrderStatus::Filled,
+                'CANCELLED' => TradeOrderStatus::Cancelled,
+                'REJECTED' => TradeOrderStatus::Failed,
+                default => TradeOrderStatus::Submitted,
+            },
+        ]);
     }
 
     /**
@@ -142,19 +206,7 @@ class ReconcileUnknownOrders
             }
 
             $claimedIds[] = (int) $match['id'];
-            $externalStatus = is_string($match['status'] ?? null) ? $match['status'] : null;
-
-            $order->update([
-                'external_id' => (int) $match['id'],
-                'external_status' => $externalStatus,
-                'status' => match ($externalStatus) {
-                    'FILLED' => TradeOrderStatus::Filled,
-                    'CANCELLED' => TradeOrderStatus::Cancelled,
-                    'REJECTED' => TradeOrderStatus::Failed,
-                    default => TradeOrderStatus::Submitted,
-                },
-                'response' => $match,
-            ]);
+            $this->resolveOrder($order, $match);
         }
 
         return $unmatched;

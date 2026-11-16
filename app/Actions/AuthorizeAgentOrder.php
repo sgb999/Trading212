@@ -96,11 +96,43 @@ class AuthorizeAgentOrder
             $this->deny('The role has a max order value but the price could not be determined; use a limit order.');
         }
 
-        $value = round($price * $order->quantity, 2);
+        $value = round($price * $order->quantity / $this->pricePerPound($account, $order->ticker), 2);
 
         if ($value > (float) $role->max_order_value) {
-            $this->deny("Estimated order value {$value} exceeds the role's max of {$role->max_order_value}.");
+            $this->deny("Estimated order value £{$value} (GBP) exceeds the role's max of £{$role->max_order_value}.");
         }
+    }
+
+    /**
+     * How many units of the instrument's quote currency make one pound: 100 for GBX (pence), 1 for GBP.
+     *
+     * Prices from Trading 212 are in the instrument's currency. Any other currency is denied rather than converted.
+     *
+     * @throws AgentNotAuthorizedException
+     */
+    private function pricePerPound(TradingAccount $account, string $ticker): int
+    {
+        try {
+            $instrument = collect($account->client()->instruments())
+                ->first(fn (array $tradableInstrument): bool => ($tradableInstrument['ticker'] ?? null) === $ticker);
+        } catch (Trading212Exception) {
+            $this->deny('The role has a max order value but the instrument list could not be fetched to check the currency.');
+        }
+
+        if ($instrument === null) {
+            $this->deny("The role has a max order value but instrument {$ticker} was not found to check its currency.");
+        }
+
+        $currencyCode = $instrument['currencyCode'] ?? null;
+
+        return match ($currencyCode) {
+            'GBX' => 100,
+            'GBP' => 1,
+            null => $this->deny("The role has a max order value but the currency of {$ticker} is unknown."),
+            default => $this->deny(
+                "The role has a max order value in GBP but {$ticker} is quoted in {$currencyCode}; only GBP and GBX instruments are allowed."
+            ),
+        };
     }
 
     /**

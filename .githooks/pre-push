@@ -3,6 +3,14 @@
 # Bypass in an emergency with: git push --no-verify
 set -euo pipefail
 
+# GUI git clients don't source ~/.bashrc, so add the Flock (php, node) and pnpm shims explicitly.
+for dir in "$HOME/.local/share/pnpm/bin" "$HOME/.local/share/flock/node-global/current/bin" "$HOME/.local/share/flock/bin"; do
+    if [ -d "$dir" ]; then
+        PATH="$dir:$PATH"
+    fi
+done
+export PATH
+
 cd "$(git rev-parse --show-toplevel)"
 
 echo "pre-push: running server tests (Unit + Feature)..."

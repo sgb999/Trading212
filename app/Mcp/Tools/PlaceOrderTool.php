@@ -38,6 +38,8 @@ use Laravel\Mcp\Server\Tools\Annotations\IsDestructive;
     Your role's permissions and limits (see get-my-permissions) are enforced; violations are rejected and logged.
     If the result is an "order_outcome_unknown" error, the order MAY have been placed: do not place it again.
     It is reconciled at the next account sync; until then new orders for that ticker are refused.
+    If your role has restrict_to_allowed_tickers=true and allowed_tickers is empty or null, no ticker is allowed:
+    every order is denied until the owner adds tickers.
     TEXT)]
 #[IsDestructive]
 class PlaceOrderTool extends TradingTool

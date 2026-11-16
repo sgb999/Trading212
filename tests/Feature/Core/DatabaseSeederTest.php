@@ -13,7 +13,7 @@ test('it seeds a local admin and the preset roles and can be re-run', function (
 
     $admin = User::query()->where('email', 'admin@example.com')->sole();
     expect(Hash::check('password', $admin->password))->toBeTrue()
-        ->and(Role::query()->count())->toBe(3)
+        ->and(Role::query()->count())->toBe(4)
         ->and(TradingAccount::query()->count())->toBe(0);
 });
 

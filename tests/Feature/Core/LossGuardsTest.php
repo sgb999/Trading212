@@ -5,12 +5,14 @@ use App\Data\OrderRequest;
 use App\Enums\OrderSide;
 use App\Enums\OrderType;
 use App\Enums\Permission;
+use App\Enums\TimeValidity;
 use App\Enums\TradeOrderStatus;
 use App\Exceptions\AgentNotAuthorizedException;
 use App\Models\AiAgent;
 use App\Models\PortfolioSnapshot;
 use App\Models\Role;
 use App\Models\TradingAccount;
+use App\Services\Trading212\Trading212RateLimiter;
 use Illuminate\Http\Client\Request as HttpRequest;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
@@ -73,9 +75,18 @@ function lossGuardOrder(OrderSide $side = OrderSide::Buy): OrderRequest
     return new OrderRequest(ticker: 'VUSA_EQ', type: OrderType::Limit, side: $side, quantity: 1, limitPrice: 10);
 }
 
-function lossGuardPlace(TradingAccount $account, AiAgent $agent, OrderSide $side = OrderSide::Buy): TradeOrderStatus
+function lossGuardPlace(
+    TradingAccount $account,
+    AiAgent $agent,
+    OrderSide $side = OrderSide::Buy,
+    ?OrderRequest $order = null,
+): TradeOrderStatus {
+    return app(PlaceOrder::class)->handle($account, $order ?? lossGuardOrder($side), $agent)->status;
+}
+
+function lossGuardSummaryRequests(): int
 {
-    return app(PlaceOrder::class)->handle($account, lossGuardOrder($side), $agent)->status;
+    return Http::recorded(fn (HttpRequest $request): bool => str_contains($request->url(), 'account/summary'))->count();
 }
 
 function lossGuardAssertNoOrderSent(): void
@@ -281,4 +292,140 @@ test('today is the Europe/London day, not the UTC day', function () {
     lossGuardSnapshot($this->account, 200, '2026-07-16 00:15');
 
     expect(lossGuardPlace($this->account, $agent))->toBe(TradeOrderStatus::Submitted);
+});
+
+test('a non-day buy is denied when a guard is set', function (OrderType $type, ?float $maxLoss, ?float $minValue) {
+    lossGuardSnapshot($this->account, 200, '2026-11-16 08:05');
+    lossGuardFakeTrading212(200);
+    $agent = lossGuardAgent($this->account, $maxLoss, $minValue);
+    $order = new OrderRequest(
+        ticker: 'VUSA_EQ',
+        type: $type,
+        side: OrderSide::Buy,
+        quantity: 1,
+        limitPrice: $type->requiresLimitPrice() ? 10 : null,
+        stopPrice: $type->requiresStopPrice() ? 10 : null,
+        timeValidity: TimeValidity::GoodTillCancel,
+    );
+
+    expect(fn () => lossGuardPlace($this->account, $agent, order: $order))
+        ->toThrow(AgentNotAuthorizedException::class, 'BUY orders must use DAY time validity');
+
+    lossGuardAssertNoOrderSent();
+    expect(lossGuardSummaryRequests())->toBe(0);
+})->with([
+    'limit' => OrderType::Limit,
+    'stop' => OrderType::Stop,
+    'stop limit' => OrderType::StopLimit,
+])->with([
+    'max daily loss' => [5, null],
+    'min portfolio value' => [null, 100],
+]);
+
+test('a buy with no time validity defaults to day and is sent as day', function () {
+    lossGuardSnapshot($this->account, 200, '2026-11-16 08:05');
+    lossGuardFakeTrading212(200);
+    $agent = lossGuardAgent($this->account, 5);
+    $order = OrderRequest::fromArray([
+        'ticker' => 'VUSA_EQ', 'type' => 'LIMIT', 'side' => 'BUY', 'quantity' => 1, 'limit_price' => 10,
+    ]);
+
+    expect(lossGuardPlace($this->account, $agent, order: $order))->toBe(TradeOrderStatus::Submitted);
+
+    Http::assertSent(fn (HttpRequest $request): bool => $request->method() === 'POST'
+        && $request['timeValidity'] === TimeValidity::Day->value);
+});
+
+test('the day-only rule leaves market buys, sells and unguarded roles alone', function (string $scenario) {
+    lossGuardSnapshot($this->account, 200, '2026-11-16 08:05');
+    lossGuardFakeTrading212(200);
+    $agent = lossGuardAgent($this->account, $scenario === 'unguarded role' ? null : 5);
+    $order = new OrderRequest(
+        ticker: 'VUSA_EQ',
+        type: $scenario === 'market buy' ? OrderType::Market : OrderType::Limit,
+        side: $scenario === 'sell' ? OrderSide::Sell : OrderSide::Buy,
+        quantity: 1,
+        limitPrice: $scenario === 'market buy' ? null : 10,
+        timeValidity: TimeValidity::GoodTillCancel,
+    );
+
+    expect(lossGuardPlace($this->account, $agent, order: $order))->toBe(TradeOrderStatus::Submitted);
+})->with(['market buy', 'sell', 'unguarded role']);
+
+test('the snapshot checks run before the max value check calls the api', function () {
+    lossGuardFakeTrading212(200);
+    $role = Role::factory()
+        ->withPermissions(Permission::cases())
+        ->withLossGuards(5, null)
+        ->create(['max_order_value' => 100]);
+    $agent = AiAgent::factory()->for($role)->for($this->account->user)->create();
+    $agent->tradingAccounts()->attach($this->account);
+    $order = new OrderRequest(ticker: 'VUSA_EQ', type: OrderType::Market, side: OrderSide::Buy, quantity: 1);
+
+    expect(fn () => lossGuardPlace($this->account, $agent, order: $order))
+        ->toThrow(AgentNotAuthorizedException::class, 'no portfolio snapshot for today');
+
+    Http::assertNothingSent();
+});
+
+test('a summary id sent as a digit string is accepted', function () {
+    lossGuardSnapshot($this->account, 200, '2026-11-16 08:05');
+    lossGuardFakeTrading212(200, ['id' => (string) LOSS_GUARD_EXTERNAL_ID]);
+    $agent = lossGuardAgent($this->account, 5);
+
+    expect(lossGuardPlace($this->account, $agent))->toBe(TradeOrderStatus::Submitted);
+});
+
+test('a buy is denied when the current total does not match cash plus investments', function () {
+    lossGuardSnapshot($this->account, 200, '2026-11-16 08:05');
+    lossGuardFakeTrading212(200, [
+        'cash' => ['availableToTrade' => 50, 'reservedForOrders' => 0, 'inPies' => 0],
+        'investments' => ['currentValue' => 50],
+    ]);
+    $agent = lossGuardAgent($this->account, 5);
+
+    expect(fn () => lossGuardPlace($this->account, $agent))
+        ->toThrow(AgentNotAuthorizedException::class, 'totalValue does not match cash + investments');
+
+    lossGuardAssertNoOrderSent();
+});
+
+test('a stale cached summary is ignored and a fresh one is fetched', function () {
+    lossGuardSnapshot($this->account, 200, '2026-11-16 08:05');
+    $summary = fn (float $totalValue): array => [
+        'id' => LOSS_GUARD_EXTERNAL_ID,
+        'currency' => 'GBP',
+        'totalValue' => $totalValue,
+        'cash' => ['availableToTrade' => $totalValue, 'reservedForOrders' => 0, 'inPies' => 0],
+        'investments' => ['currentValue' => 0],
+    ];
+    Http::fake([
+        'demo.trading212.com/api/v0/equity/account/summary' => Http::sequence()
+            ->push($summary(200))
+            ->push($summary(150)),
+        'demo.trading212.com/api/v0/equity/orders/*' => Http::response(['id' => 555, 'status' => 'NEW']),
+    ]);
+    $agent = lossGuardAgent($this->account, 5);
+
+    expect($this->account->client()->accountSummary()['totalValue'])->toBe(200);
+    app(Trading212RateLimiter::class)->clear($this->account, 'account.summary');
+
+    expect(fn () => lossGuardPlace($this->account, $agent))
+        ->toThrow(AgentNotAuthorizedException::class, 'Portfolio value £150.00 is down 25.00%');
+
+    expect(lossGuardSummaryRequests())->toBe(2);
+    lossGuardAssertNoOrderSent();
+});
+
+test('a buy is denied when the summary call is rate limited', function () {
+    config(['trading212.max_wait_seconds' => 0]);
+    lossGuardSnapshot($this->account, 200, '2026-11-16 08:05');
+    lossGuardFakeTrading212(200);
+    $agent = lossGuardAgent($this->account, 5);
+    app(Trading212RateLimiter::class)->acquire($this->account, 'account.summary', maxWait: 0);
+
+    expect(fn () => lossGuardPlace($this->account, $agent))
+        ->toThrow(AgentNotAuthorizedException::class, 'Trading 212 rate limit reached for [account.summary]');
+
+    Http::assertNothingSent();
 });

@@ -4,7 +4,9 @@ namespace App\Actions;
 
 use App\Data\OrderRequest;
 use App\Enums\OrderSide;
+use App\Enums\OrderType;
 use App\Enums\Permission;
+use App\Enums\TimeValidity;
 use App\Enums\TradeOrderStatus;
 use App\Exceptions\AgentNotAuthorizedException;
 use App\Models\AiAgent;
@@ -12,12 +14,15 @@ use App\Models\PortfolioSnapshot;
 use App\Models\Role;
 use App\Models\TradingAccount;
 use App\Services\Trading212\Exceptions\Trading212Exception;
+use UnexpectedValueException;
 
 /**
  * Checks an AI agent's role (permissions + limits) against an order before it is sent.
  */
 class AuthorizeAgentOrder
 {
+    public function __construct(private readonly RecordPortfolioSnapshot $recordPortfolioSnapshot) {}
+
     /**
      * @throws AgentNotAuthorizedException
      */
@@ -28,9 +33,13 @@ class AuthorizeAgentOrder
         $this->ensureMaySell($agent, $order);
         $this->ensureTickerAllowed($agent->role, $order);
         $this->ensureWithinMaxQuantity($agent->role, $order);
+        $lossGuardReference = $this->lossGuardReference($agent->role, $account, $order);
         $this->ensureWithinMaxValue($agent->role, $account, $order);
         $this->ensureWithinDailyOrderLimit($agent);
-        $this->ensureWithinLossGuards($agent->role, $account, $order);
+
+        if ($lossGuardReference !== null) {
+            $this->ensureWithinLossGuards($agent->role, $account, $lossGuardReference);
+        }
     }
 
     /**
@@ -127,33 +136,34 @@ class AuthorizeAgentOrder
     }
 
     /**
-     * Loss guards on agent BUY orders. SELLs always pass, so an agent can still reduce risk.
+     * The DB-only half of the loss guards on agent BUY orders, run before any check that calls the API.
+     * SELLs always pass, so an agent can still reduce risk. Returns null when no loss guard applies.
      *
      * When `max_daily_loss_percent` or `min_portfolio_value` is set, a BUY is denied when:
+     * - it is a limit, stop or stop-limit order whose time validity is not DAY. A GOOD_TILL_CANCEL order
+     *   placed while the account is healthy would otherwise still fill after it breaches the floor.
+     *   {@see OrderRequest} defaults a missing validity to DAY and the client always sends it for
+     *   non-market orders, so Trading 212's own default never applies;
      * - there is no portfolio snapshot today (Europe/London, {@see TradingAccount::firstSnapshotToday()});
-     * - a reference snapshot, or the current summary, is not in GBP;
-     * - the current value cannot be fetched or is invalid (fail closed);
-     * - the current value is more than `max_daily_loss_percent` below the day's reference value;
-     * - the current value is below `min_portfolio_value`.
+     * - a reference snapshot is not in GBP.
      *
      * The reference value is max(first snapshot today, last snapshot before it). When the morning syncs
      * fail, today's first snapshot may be taken after a drop; the previous day's last snapshot still holds
      * the higher value, so the drop is not hidden. A drop overnight therefore also counts towards today's loss.
      *
-     * The current value comes from a fresh account summary, not the latest snapshot: snapshots are
-     * throttled to one every 15 minutes and stop when syncs fail, so the latest one can hide a recent drop.
-     *
-     * Deposits and withdrawals move the total value too: a withdrawal counts as a loss for the rest of the day.
+     * @return array{referenceValue: float, externalAccountId: int}|null
      *
      * @throws AgentNotAuthorizedException
      */
-    private function ensureWithinLossGuards(Role $role, TradingAccount $account, OrderRequest $order): void
+    private function lossGuardReference(Role $role, TradingAccount $account, OrderRequest $order): ?array
     {
-        $maxLossPercent = $role->max_daily_loss_percent;
-        $minPortfolioValue = $role->min_portfolio_value;
+        if ($order->side !== OrderSide::Buy || ! $this->hasLossGuards($role)) {
+            return null;
+        }
 
-        if ($order->side !== OrderSide::Buy || ($maxLossPercent === null && $minPortfolioValue === null)) {
-            return;
+        if ($order->type !== OrderType::Market && $order->timeValidity !== TimeValidity::Day) {
+            $this->deny("Role [{$role->name}] has loss guards, so {$order->type->getLabel()} BUY orders must use "
+                .'DAY time validity; a pending order could otherwise fill after the account breaches its floor.');
         }
 
         $firstSnapshotToday = $account->firstSnapshotToday();
@@ -163,8 +173,32 @@ class AuthorizeAgentOrder
                 .'so BUY orders are blocked until the account syncs. SELL orders are still allowed.');
         }
 
-        $referenceValue = $this->dayReferenceValue($account, $firstSnapshotToday);
-        $currentValue = $this->currentPortfolioValue($account, (int) $firstSnapshotToday->external_account_id);
+        return [
+            'referenceValue' => $this->dayReferenceValue($account, $firstSnapshotToday),
+            'externalAccountId' => (int) $firstSnapshotToday->external_account_id,
+        ];
+    }
+
+    /**
+     * The API half of the loss guards, run last. A BUY is denied when the current value cannot be fetched
+     * or is invalid (fail closed), is more than `max_daily_loss_percent` below the day's reference value, or
+     * is below `min_portfolio_value`.
+     *
+     * The current value comes from a fresh account summary, not the latest snapshot: snapshots are
+     * throttled to one every 15 minutes and stop when syncs fail, so the latest one can hide a recent drop.
+     *
+     * Deposits and withdrawals move the total value too: a withdrawal counts as a loss for the rest of the day.
+     *
+     * @param  array{referenceValue: float, externalAccountId: int}  $reference
+     *
+     * @throws AgentNotAuthorizedException
+     */
+    private function ensureWithinLossGuards(Role $role, TradingAccount $account, array $reference): void
+    {
+        $maxLossPercent = $role->max_daily_loss_percent;
+        $minPortfolioValue = $role->min_portfolio_value;
+        $referenceValue = $reference['referenceValue'];
+        $currentValue = $this->currentPortfolioValue($account, $reference['externalAccountId']);
         $current = number_format($currentValue, 2, '.', '');
 
         if ($maxLossPercent !== null) {
@@ -184,6 +218,11 @@ class AuthorizeAgentOrder
             $this->deny("Portfolio value £{$current} is below the role's minimum of £{$minPortfolioValue}; "
                 .'BUY orders are blocked. SELL orders are still allowed.');
         }
+    }
+
+    private function hasLossGuards(Role $role): bool
+    {
+        return $role->max_daily_loss_percent !== null || $role->min_portfolio_value !== null;
     }
 
     /**
@@ -215,7 +254,9 @@ class AuthorizeAgentOrder
 
     /**
      * The account's current total value in GBP from a fresh summary, rounded to pence. Denies when it cannot
-     * be fetched, is not a positive number, is not in GBP, or belongs to another Trading 212 account.
+     * be fetched (including when rate limited), is not a positive number, does not match cash + invested
+     * ({@see RecordPortfolioSnapshot::validatedAttributes()}), is not in GBP, or belongs to another
+     * Trading 212 account.
      *
      * @throws AgentNotAuthorizedException
      */
@@ -231,10 +272,15 @@ class AuthorizeAgentOrder
 
         $totalValue = $summary['totalValue'] ?? null;
         $currency = $summary['currency'] ?? $account->currency;
-        $summaryAccountId = $summary['id'] ?? null;
 
         if (! is_numeric($totalValue) || ! is_finite((float) $totalValue) || (float) $totalValue <= 0) {
             $this->deny("{$failure} (invalid totalValue); BUY orders are blocked.");
+        }
+
+        try {
+            $this->recordPortfolioSnapshot->validatedAttributes($account, $summary);
+        } catch (UnexpectedValueException $e) {
+            $this->deny("{$failure} ({$e->getMessage()}); BUY orders are blocked.");
         }
 
         if ($currency !== 'GBP') {
@@ -244,7 +290,13 @@ class AuthorizeAgentOrder
                 .'BUY orders are blocked.');
         }
 
-        if (! is_int($summaryAccountId) || $summaryAccountId !== $externalAccountId) {
+        try {
+            $summaryAccountId = $this->recordPortfolioSnapshot->externalAccountId($summary);
+        } catch (UnexpectedValueException) {
+            $summaryAccountId = null;
+        }
+
+        if ($summaryAccountId !== $externalAccountId) {
             $this->deny("{$failure} (the summary is for a different Trading 212 account than today's snapshot); "
                 .'BUY orders are blocked.');
         }

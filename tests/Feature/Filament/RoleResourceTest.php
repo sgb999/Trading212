@@ -112,6 +112,7 @@ it('validates the loss guards', function (array $data, array $errors) {
     'percent above 100' => [['max_daily_loss_percent' => 100.01], ['max_daily_loss_percent' => 'max']],
     'negative percent' => [['max_daily_loss_percent' => -1], ['max_daily_loss_percent' => 'min']],
     'negative min value' => [['min_portfolio_value' => -0.01], ['min_portfolio_value' => 'min']],
+    'min value above the max' => [['min_portfolio_value' => 1_000_000_000.01], ['min_portfolio_value' => 'max']],
     'non-numeric percent' => [['max_daily_loss_percent' => 'abc'], ['max_daily_loss_percent' => 'numeric']],
 ]);
 

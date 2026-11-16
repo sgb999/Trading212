@@ -216,6 +216,8 @@ test('place-order denies a buy past the daily loss limit and still allows a sell
             'id' => 7_654_321,
             'currency' => 'GBP',
             'totalValue' => 180,
+            'cash' => ['availableToTrade' => 30],
+            'investments' => ['currentValue' => 150],
         ]),
         'demo.trading212.com/api/v0/equity/orders/*' => Http::response(['id' => 901, 'status' => 'NEW']),
     ]);

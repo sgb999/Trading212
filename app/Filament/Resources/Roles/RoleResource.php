@@ -128,6 +128,7 @@ class RoleResource extends Resource
                             ->label('Min portfolio value')
                             ->numeric()
                             ->minValue(0)
+                            ->maxValue(1_000_000_000)
                             ->step('any')
                             ->prefix('£')
                             ->helperText('Agent BUYs are denied while the account total value is below this (GBP).'),

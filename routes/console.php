@@ -8,4 +8,9 @@ Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-Schedule::command('trading212:sync')->everyMinute()->withoutOverlapping(5);
+Schedule::command('trading212:sync')
+    ->everyMinute()
+    ->weekdays()
+    ->between('07:00', '17:00')
+    ->timezone('Europe/London')
+    ->withoutOverlapping(5);

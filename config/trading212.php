@@ -28,7 +28,19 @@ return [
     'max_wait_seconds' => (int) env('TRADING212_MAX_WAIT', 10),
 
     /*
-     | Cache store used for the rate limiter and response cache.
+     | Per-account lock that serialises order authorisation and placement. Its
+     | lifetime is derived from these values, `timeout` and `max_wait_seconds`
+     | (see App\Actions\PlaceOrder::lockTtlSeconds()): `max_api_calls` is the
+     | most Trading 212 calls one placement may make while holding it, and
+     | `margin_seconds` is added on top for database work.
+     */
+    'order_lock' => [
+        'max_api_calls' => (int) env('TRADING212_ORDER_LOCK_MAX_API_CALLS', 6),
+        'margin_seconds' => (int) env('TRADING212_ORDER_LOCK_MARGIN_SECONDS', 60),
+    ],
+
+    /*
+     | Cache store used for the rate limiter, response cache and order lock.
      */
     'cache_store' => env('TRADING212_CACHE_STORE'),
 

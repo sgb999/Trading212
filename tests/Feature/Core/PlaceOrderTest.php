@@ -161,11 +161,16 @@ test('an agent may not exceed the max order quantity', function () {
 });
 
 test('the max order value is checked against the limit price', function () {
+    Http::fake([
+        'demo.trading212.com/api/v0/equity/metadata/instruments' => Http::response([
+            ['ticker' => 'VUSAl_EQ', 'currencyCode' => 'GBP'],
+        ]),
+    ]);
     coreFakeOrderEndpoints();
     $account = TradingAccount::factory()->create();
     $agent = coreAgentFor($account, roleAttributes: ['max_order_value' => 500]);
     $limit = fn (float $quantity) => new OrderRequest(
-        'AAPL_US_EQ',
+        'VUSAl_EQ',
         OrderType::Limit,
         OrderSide::Buy,
         $quantity,
@@ -175,23 +180,26 @@ test('the max order value is checked against the limit price', function () {
     app(PlaceOrder::class)->handle($account, $limit(5), $agent);
 
     expect(fn () => app(PlaceOrder::class)->handle($account, $limit(5.1), $agent))
-        ->toThrow(AgentNotAuthorizedException::class, 'Estimated order value 510');
+        ->toThrow(AgentNotAuthorizedException::class, 'Estimated order value £510');
 });
 
 test('the max order value of a market order uses the current position price', function () {
     Http::fake([
         'demo.trading212.com/api/v0/equity/positions' => Http::response([
-            ['instrument' => ['ticker' => 'AAPL_US_EQ'], 'currentPrice' => 200, 'quantity' => 1],
+            ['instrument' => ['ticker' => 'VUSAl_EQ'], 'currentPrice' => 200, 'quantity' => 1],
+        ]),
+        'demo.trading212.com/api/v0/equity/metadata/instruments' => Http::response([
+            ['ticker' => 'VUSAl_EQ', 'currencyCode' => 'GBP'],
         ]),
         'demo.trading212.com/api/v0/equity/orders/market' => Http::response(['id' => 1, 'status' => 'NEW']),
     ]);
     $account = TradingAccount::factory()->create();
     $agent = coreAgentFor($account, roleAttributes: ['max_order_value' => 500]);
 
-    app(PlaceOrder::class)->handle($account, coreMarketBuy(2.5), $agent);
+    app(PlaceOrder::class)->handle($account, coreMarketBuy(2.5, 'VUSAl_EQ'), $agent);
 
-    expect(fn () => app(PlaceOrder::class)->handle($account, coreMarketBuy(3), $agent))
-        ->toThrow(AgentNotAuthorizedException::class, 'Estimated order value 600');
+    expect(fn () => app(PlaceOrder::class)->handle($account, coreMarketBuy(3, 'VUSAl_EQ'), $agent))
+        ->toThrow(AgentNotAuthorizedException::class, 'Estimated order value £600');
 });
 
 test('a market order is denied when a max value is set and the price is unknown', function () {

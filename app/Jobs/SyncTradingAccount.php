@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Actions\RecordPortfolioSnapshot;
 use App\Enums\TradeOrderStatus;
 use App\Events\PortfolioUpdated;
 use App\Models\TradeOrder;
@@ -83,6 +84,8 @@ class SyncTradingAccount implements ShouldBeUnique, ShouldQueue
             'currency' => $summary['currency'] ?? $account->currency,
             'last_synced_at' => now(),
         ]);
+
+        app(RecordPortfolioSnapshot::class)->handle($account, $summary);
 
         $this->reconcileOrders($client, $pendingOrders);
 

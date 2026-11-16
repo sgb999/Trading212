@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Actions\RecordPortfolioSnapshot;
 use App\Enums\Trading212Environment;
 use App\Services\Trading212\Trading212Client;
 use Database\Factories\TradingAccountFactory;
@@ -79,6 +80,37 @@ class TradingAccount extends Model
     public function tradeOrders(): HasMany
     {
         return $this->hasMany(TradeOrder::class);
+    }
+
+    /**
+     * @return HasMany<PortfolioSnapshot, $this>
+     */
+    public function portfolioSnapshots(): HasMany
+    {
+        return $this->hasMany(PortfolioSnapshot::class);
+    }
+
+    /**
+     * The account's first snapshot (its starting value). Set once by {@see RecordPortfolioSnapshot}
+     * and deliberately not fillable, so it is never overwritten.
+     *
+     * @return BelongsTo<PortfolioSnapshot, $this>
+     */
+    public function baselineSnapshot(): BelongsTo
+    {
+        return $this->belongsTo(PortfolioSnapshot::class, 'baseline_snapshot_id');
+    }
+
+    /**
+     * The first snapshot taken today (Europe/London calendar day), if any.
+     */
+    public function firstSnapshotToday(): ?PortfolioSnapshot
+    {
+        return $this->portfolioSnapshots()
+            ->takenOnLondonDay()
+            ->oldest('taken_at')
+            ->oldest('id')
+            ->first();
     }
 
     /**

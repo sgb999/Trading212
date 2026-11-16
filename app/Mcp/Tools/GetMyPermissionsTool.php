@@ -21,6 +21,8 @@ use Override;
     'Show your agent name, role, granted permissions and trading limits '
     .'(max quantity / value per order, max orders per day, allowed tickers, and the BUY loss guards: '
     .'max daily loss percent and min portfolio value in GBP). '
+    .'max_order_value is in GBP (pounds) and applies to buys only; see max_order_value_currency. '
+    .'Sells are limited to shares you hold and can still sell (no shorting). '
     .'Check this before trading to avoid denied requests.'
 )]
 #[IsReadOnly]

@@ -31,7 +31,13 @@ function mcpTrader(TradingAccount $account, ?Role $role = null): AiAgent
 
 test('a market sell is sent with a negative quantity and Basic auth', function () {
     $agent = mcpTrader($this->account);
-    Http::fake(['demo.trading212.com/api/v0/equity/orders/market' => Http::response(['id' => 555, 'status' => 'NEW'])]);
+    Http::fake([
+        'demo.trading212.com/api/v0/equity/positions' => Http::response([
+            ['instrument' => ['ticker' => 'AAPL_US_EQ'], 'quantity' => 2, 'quantityAvailableForTrading' => 2],
+        ]),
+        'demo.trading212.com/api/v0/equity/orders' => Http::response([]),
+        'demo.trading212.com/api/v0/equity/orders/market' => Http::response(['id' => 555, 'status' => 'NEW']),
+    ]);
 
     TradingServer::tool(PlaceOrderTool::class, [
         'ticker' => 'AAPL_US_EQ',
@@ -55,6 +61,31 @@ test('a market sell is sent with a negative quantity and Basic auth', function (
         'outcome' => AgentActivityLog::OUTCOME_ALLOWED,
         'trading_account_id' => $this->account->id,
     ]);
+});
+
+test('a sell above the max order value but within holdings is accepted', function () {
+    mcpTrader($this->account, Role::factory()->trader()->create(['max_order_value' => 50]));
+    Http::fake([
+        'demo.trading212.com/api/v0/equity/positions' => Http::response([
+            ['instrument' => ['ticker' => 'VODl_EQ'], 'quantity' => 100, 'quantityAvailableForTrading' => 100],
+        ]),
+        'demo.trading212.com/api/v0/equity/orders' => Http::response([]),
+        'demo.trading212.com/api/v0/equity/orders/limit' => Http::response(['id' => 557, 'status' => 'NEW']),
+    ]);
+
+    TradingServer::tool(PlaceOrderTool::class, [
+        'ticker' => 'VODl_EQ',
+        'type' => 'LIMIT',
+        'side' => 'SELL',
+        'quantity' => 100,
+        'limit_price' => 412,
+    ])
+        ->assertOk()
+        ->assertStructuredContentPath('order.id', 557);
+
+    Http::assertSent(fn (HttpRequest $request): bool => $request->method() === 'POST'
+        && $request->url() === 'https://demo.trading212.com/api/v0/equity/orders/limit'
+        && (float) $request['quantity'] === -100.0);
 });
 
 test('a limit buy is sent with its limit price and time validity', function () {
@@ -243,4 +274,56 @@ test('place-order denies a buy past the daily loss limit and still allows a sell
         ->assertOk();
 
     Http::assertSent(fn (HttpRequest $request): bool => $request->method() === 'POST');
+});
+
+test('an extended-hours order is denied and logged without an HTTP call', function (mixed $extendedHours) {
+    mcpTrader($this->account);
+
+    TradingServer::tool(PlaceOrderTool::class, [
+        'ticker' => 'AAPL_US_EQ',
+        'type' => 'MARKET',
+        'side' => 'BUY',
+        'quantity' => 1,
+        'extended_hours' => $extendedHours,
+    ])
+        ->assertHasErrors(['Permission denied', 'AI agents may not place extended-hours orders']);
+
+    Http::assertNothingSent();
+    expect(TradeOrder::query()->count())->toBe(0)
+        ->and(AgentActivityLog::query()->sole()->outcome)->toBe(AgentActivityLog::OUTCOME_DENIED);
+})->with([
+    'boolean true' => true,
+    'integer 1' => 1,
+    'string "1"' => '1',
+]);
+
+test('a non-boolean extended_hours value is rejected without an HTTP call', function () {
+    mcpTrader($this->account);
+
+    TradingServer::tool(PlaceOrderTool::class, [
+        'ticker' => 'AAPL_US_EQ',
+        'type' => 'MARKET',
+        'side' => 'BUY',
+        'quantity' => 1,
+        'extended_hours' => 'yes',
+    ])->assertHasErrors();
+
+    Http::assertNothingSent();
+});
+
+test('an order with extended_hours false is placed as before', function () {
+    mcpTrader($this->account);
+    Http::fake(['demo.trading212.com/api/v0/equity/orders/market' => Http::response(['id' => 557, 'status' => 'NEW'])]);
+
+    TradingServer::tool(PlaceOrderTool::class, [
+        'ticker' => 'AAPL_US_EQ',
+        'type' => 'MARKET',
+        'side' => 'BUY',
+        'quantity' => 1,
+        'extended_hours' => false,
+    ])
+        ->assertOk()
+        ->assertStructuredContentPath('order.id', 557);
+
+    Http::assertSent(fn (HttpRequest $request): bool => $request['extendedHours'] === false);
 });

@@ -111,7 +111,7 @@ class RoleResource extends Resource
                             ->numeric()
                             ->minValue(0)
                             ->step('any')
-                            ->helperText('In the account currency.'),
+                            ->helperText('In the account currency. Applies to buys only.'),
                         TextInput::make('max_orders_per_day')
                             ->label('Max orders per day')
                             ->integer()

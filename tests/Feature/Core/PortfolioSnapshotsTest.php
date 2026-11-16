@@ -66,6 +66,24 @@ test('a sync records a snapshot mapped from the account summary', function () {
         ->taken_at->toEqual(now());
 });
 
+test('a sync records a snapshot from an all-cash summary in the shape Trading 212 returns', function () {
+    fakeSyncResponses([
+        'id' => 12345678,
+        'currency' => 'GBP',
+        'totalValue' => 200.0,
+        'cash' => ['availableToTrade' => 200.0, 'reservedForOrders' => 0, 'inPies' => 0],
+        'investments' => ['currentValue' => 0, 'totalCost' => 0, 'realizedProfitLoss' => -1.5, 'unrealizedProfitLoss' => 0],
+    ]);
+    $account = TradingAccount::factory()->create();
+
+    SyncTradingAccount::dispatchSync($account);
+
+    expect($account->portfolioSnapshots()->sole())
+        ->total_value->toBe('200.0000')
+        ->cash->toBe('200.0000')
+        ->invested->toBe('0.0000');
+});
+
 test('syncs record at most one snapshot every 15 minutes per account', function () {
     fakeSyncResponses();
     [$account, $otherAccount] = TradingAccount::factory()->count(2)->create();

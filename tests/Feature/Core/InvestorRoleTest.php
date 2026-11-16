@@ -66,6 +66,9 @@ function investorHealthyPortfolio(TradingAccount $account): void
             'cash' => ['availableToTrade' => 200, 'reservedForOrders' => 0, 'inPies' => 0],
             'investments' => ['currentValue' => 0],
         ]),
+        'demo.trading212.com/api/v0/equity/metadata/instruments' => Http::response([
+            ['ticker' => 'VUSA_EQ', 'currencyCode' => 'GBP'],
+        ]),
         'demo.trading212.com/api/v0/equity/orders/*' => Http::response(['id' => 901, 'status' => 'NEW']),
     ]);
 }

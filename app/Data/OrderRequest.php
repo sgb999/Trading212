@@ -38,6 +38,18 @@ final readonly class OrderRequest
                 "A positive stop price is required for {$this->type->getLabel()} orders."
             );
         }
+
+        if (! $this->type->requiresLimitPrice() && $this->limitPrice !== null) {
+            throw new InvalidArgumentException(
+                "A limit price is not allowed on {$this->type->getLabel()} orders."
+            );
+        }
+
+        if (! $this->type->requiresStopPrice() && $this->stopPrice !== null) {
+            throw new InvalidArgumentException(
+                "A stop price is not allowed on {$this->type->getLabel()} orders."
+            );
+        }
     }
 
     /**
@@ -96,13 +108,5 @@ final readonly class OrderRequest
     public function signedQuantity(): float
     {
         return $this->side->signedQuantity($this->quantity);
-    }
-
-    /**
-     * Best-known price per share for value checks (limit, then stop), if any.
-     */
-    public function knownPrice(): ?float
-    {
-        return $this->limitPrice ?? $this->stopPrice;
     }
 }

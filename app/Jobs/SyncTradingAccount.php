@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Actions\RecordPortfolioSnapshot;
+use App\Actions\ReconcileUnknownOrders;
 use App\Enums\TradeOrderStatus;
 use App\Events\PortfolioUpdated;
 use App\Models\TradeOrder;
@@ -55,7 +56,7 @@ class SyncTradingAccount implements ShouldBeUnique, ShouldQueue
     /**
      * Number of recent historical orders inspected when reconciling (API max per page).
      */
-    private const int HISTORY_PAGE_SIZE = 50;
+    public const int HISTORY_PAGE_SIZE = 50;
 
     /**
      * Consecutive failed syncs after which a single Discord alert is posted.
@@ -111,6 +112,7 @@ class SyncTradingAccount implements ShouldBeUnique, ShouldQueue
         }
 
         $this->reconcileOrders($client, $pendingOrders);
+        app(ReconcileUnknownOrders::class)->handle($account, $client, $pendingOrders);
 
         $hash = md5(json_encode([$summary, $positions, $pendingOrders]) ?: '');
         $cache = $this->cache();

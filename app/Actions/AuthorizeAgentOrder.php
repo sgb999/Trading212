@@ -101,17 +101,71 @@ class AuthorizeAgentOrder
             return;
         }
 
-        $price = $order->knownPrice() ?? $this->currentPrice($account, $order->ticker);
-
-        if ($price === null) {
-            $this->deny('The role has a max order value but the price could not be determined; use a limit order.');
-        }
-
-        $value = round($price * $order->quantity, 2);
+        $value = $this->worstCasePrice($account, $order) * $order->quantity / $this->pricePerPound($account, $order->ticker);
 
         if ($value > (float) $role->max_order_value) {
-            $this->deny("Estimated order value {$value} exceeds the role's max of {$role->max_order_value}.");
+            $roundedValue = number_format($value, 2, thousands_separator: '');
+
+            $this->deny("Estimated order value £{$roundedValue} (GBP) exceeds the role's max of £{$role->max_order_value}.");
         }
+    }
+
+    /**
+     * The highest price per share (in the instrument currency) the order could fill at.
+     *
+     * A STOP order fills at market once triggered, and a buy stop below the market triggers immediately,
+     * so it is valued at the higher of its stop and the held position's current price.
+     *
+     * @throws AgentNotAuthorizedException
+     */
+    private function worstCasePrice(TradingAccount $account, OrderRequest $order): float
+    {
+        return match ($order->type) {
+            OrderType::Limit => (float) $order->limitPrice,
+            OrderType::StopLimit => max((float) $order->limitPrice, (float) $order->stopPrice),
+            OrderType::Market => $this->currentPrice($account, $order->ticker)
+                ?? $this->deny('The role has a max order value but the price could not be determined; use a limit order.'),
+            OrderType::Stop => max(
+                (float) $order->stopPrice,
+                $this->currentPrice($account, $order->ticker) ?? $this->deny(
+                    "The role has a max order value but the current price of {$order->ticker} could not be determined "
+                    .'(it is not held, or positions could not be fetched), so a STOP order is unbounded; use a STOP_LIMIT order.'
+                ),
+            ),
+        };
+    }
+
+    /**
+     * How many units of the instrument's quote currency make one pound: 100 for GBX (pence), 1 for GBP.
+     *
+     * Prices from Trading 212 are in the instrument's currency. Any other currency is denied rather than converted.
+     *
+     * @throws AgentNotAuthorizedException
+     */
+    private function pricePerPound(TradingAccount $account, string $ticker): int
+    {
+        try {
+            $instrument = collect($account->client()->instruments())
+                ->first(fn (mixed $tradableInstrument): bool => is_array($tradableInstrument)
+                    && ($tradableInstrument['ticker'] ?? null) === $ticker);
+        } catch (Trading212Exception) {
+            $this->deny('The role has a max order value but the instrument list could not be fetched to check the currency.');
+        }
+
+        if ($instrument === null) {
+            $this->deny("The role has a max order value but instrument {$ticker} was not found to check its currency.");
+        }
+
+        $currencyCode = is_string($instrument['currencyCode'] ?? null) ? $instrument['currencyCode'] : null;
+
+        return match ($currencyCode) {
+            'GBX' => 100,
+            'GBP' => 1,
+            null => $this->deny("The role has a max order value but the currency of {$ticker} is unknown."),
+            default => $this->deny(
+                "The role has a max order value in GBP but {$ticker} is quoted in {$currencyCode}; only GBP and GBX instruments are allowed."
+            ),
+        };
     }
 
     /**
@@ -308,12 +362,16 @@ class AuthorizeAgentOrder
     {
         try {
             $position = collect($account->client()->positions())
-                ->first(fn (array $heldPosition): bool => ($heldPosition['instrument']['ticker'] ?? null) === $ticker);
+                ->first(fn (mixed $heldPosition): bool => is_array($heldPosition)
+                    && is_array($heldPosition['instrument'] ?? null)
+                    && ($heldPosition['instrument']['ticker'] ?? null) === $ticker);
         } catch (Trading212Exception) {
             return null;
         }
 
-        return isset($position['currentPrice']) ? (float) $position['currentPrice'] : null;
+        $currentPrice = $position['currentPrice'] ?? null;
+
+        return is_numeric($currentPrice) && $currentPrice > 0 ? (float) $currentPrice : null;
     }
 
     private function deny(string $message): never

@@ -41,6 +41,16 @@ test('an agent extended-hours order is denied without an HTTP call or audit reco
     expect(TradeOrder::query()->count())->toBe(0);
 });
 
+test('an agent extended-hours limit order is denied', function () {
+    $account = TradingAccount::factory()->create();
+    $limitBuy = new OrderRequest('AAPL_US_EQ', OrderType::Limit, OrderSide::Buy, 1, limitPrice: 100, extendedHours: true);
+
+    expect(fn () => app(PlaceOrder::class)->handle($account, $limitBuy, extendedHoursAgent($account)))
+        ->toThrow(AgentNotAuthorizedException::class, 'AI agents may not place extended-hours orders');
+
+    Http::assertNothingSent();
+});
+
 test('an agent regular-hours order is placed with extended hours off', function () {
     $account = TradingAccount::factory()->create();
 

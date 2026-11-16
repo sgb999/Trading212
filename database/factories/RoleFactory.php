@@ -35,6 +35,17 @@ class RoleFactory extends Factory
         return $this->state(fn () => ['permissions' => array_map(fn (Permission $p) => $p->value, $permissions)]);
     }
 
+    /**
+     * Loss guards on agent BUY orders; null disables a guard.
+     */
+    public function withLossGuards(?float $maxDailyLossPercent = 5, ?float $minPortfolioValue = null): static
+    {
+        return $this->state(fn () => [
+            'max_daily_loss_percent' => $maxDailyLossPercent,
+            'min_portfolio_value' => $minPortfolioValue,
+        ]);
+    }
+
     public function readOnly(): static
     {
         return $this->withPermissions(Permission::readOnly());

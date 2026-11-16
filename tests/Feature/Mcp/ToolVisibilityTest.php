@@ -92,5 +92,17 @@ test('get-my-permissions describes the role and limits', function () {
         ])
         ->assertStructuredContentPath('limits.max_order_quantity', 5)
         ->assertStructuredContentPath('limits.max_orders_per_day', 3)
-        ->assertStructuredContentPath('limits.allowed_tickers', ['AAPL_US_EQ']);
+        ->assertStructuredContentPath('limits.allowed_tickers', ['AAPL_US_EQ'])
+        ->assertStructuredContentPath('limits.max_daily_loss_percent', null)
+        ->assertStructuredContentPath('limits.min_portfolio_value', null);
+});
+
+test('get-my-permissions reports the loss guards', function () {
+    $agent = AiAgent::factory()->for(Role::factory()->trader()->withLossGuards(2.5, 150))->create();
+    app(CurrentAgent::class)->set($agent);
+
+    TradingServer::tool(GetMyPermissionsTool::class)
+        ->assertOk()
+        ->assertStructuredContentPath('limits.max_daily_loss_percent', 2.5)
+        ->assertStructuredContentPath('limits.min_portfolio_value', 150);
 });

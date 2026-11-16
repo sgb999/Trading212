@@ -23,6 +23,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
     'max_order_quantity',
     'max_order_value',
     'max_orders_per_day',
+    'max_daily_loss_percent',
+    'min_portfolio_value',
     'allowed_tickers',
 ])]
 class Role extends Model
@@ -48,6 +50,8 @@ class Role extends Model
             'max_order_quantity' => 'decimal:8',
             'max_order_value' => 'decimal:2',
             'max_orders_per_day' => 'integer',
+            'max_daily_loss_percent' => 'decimal:2',
+            'min_portfolio_value' => 'decimal:2',
         ];
     }
 

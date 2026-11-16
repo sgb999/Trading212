@@ -8,6 +8,7 @@ use App\Mcp\Tools\CancelOrderTool;
 use App\Mcp\Tools\PlaceOrderTool;
 use App\Models\AgentActivityLog;
 use App\Models\AiAgent;
+use App\Models\PortfolioSnapshot;
 use App\Models\Role;
 use App\Models\TradeOrder;
 use App\Models\TradingAccount;
@@ -205,4 +206,41 @@ test('cancel-order cannot touch an unassigned account', function () {
         ->assertHasErrors(['not accessible']);
 
     Http::assertNothingSent();
+});
+
+test('place-order denies a buy past the daily loss limit and still allows a sell', function () {
+    $this->account->update(['external_account_id' => 7_654_321]);
+    PortfolioSnapshot::factory()->for($this->account)->create(['total_value' => 200, 'taken_at' => now()]);
+    Http::fake([
+        'demo.trading212.com/api/v0/equity/account/summary' => Http::response([
+            'id' => 7_654_321,
+            'currency' => 'GBP',
+            'totalValue' => 180,
+            'cash' => ['availableToTrade' => 30],
+            'investments' => ['currentValue' => 150],
+        ]),
+        'demo.trading212.com/api/v0/equity/orders/*' => Http::response(['id' => 901, 'status' => 'NEW']),
+    ]);
+    mcpTrader($this->account, Role::factory()->trader()->withLossGuards(5)->create());
+
+    TradingServer::tool(PlaceOrderTool::class, [
+        'ticker' => 'AAPL_US_EQ',
+        'type' => 'MARKET',
+        'side' => 'BUY',
+        'quantity' => 1,
+    ])
+        ->assertHasErrors(['Portfolio value £180.00 is down 10.00%']);
+
+    Http::assertNotSent(fn (HttpRequest $request): bool => $request->method() === 'POST');
+    expect(AgentActivityLog::query()->sole()->outcome)->toBe(AgentActivityLog::OUTCOME_DENIED);
+
+    TradingServer::tool(PlaceOrderTool::class, [
+        'ticker' => 'AAPL_US_EQ',
+        'type' => 'MARKET',
+        'side' => 'SELL',
+        'quantity' => 1,
+    ])
+        ->assertOk();
+
+    Http::assertSent(fn (HttpRequest $request): bool => $request->method() === 'POST');
 });

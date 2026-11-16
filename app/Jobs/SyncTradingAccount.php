@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Actions\RecordPortfolioSnapshot;
 use App\Actions\ReconcileUnknownOrders;
 use App\Enums\TradeOrderStatus;
 use App\Events\PortfolioUpdated;
@@ -99,6 +100,16 @@ class SyncTradingAccount implements ShouldBeUnique, ShouldQueue
             'currency' => $summary['currency'] ?? $account->currency,
             'last_synced_at' => now(),
         ]);
+
+        try {
+            app(RecordPortfolioSnapshot::class)->handle($account, $summary);
+        } catch (Throwable $e) {
+            Log::warning('Portfolio snapshot not recorded.', [
+                'trading_account_id' => $account->getKey(),
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
+        }
 
         $this->reconcileOrders($client, $pendingOrders);
         app(ReconcileUnknownOrders::class)->handle($account, $client, $pendingOrders);

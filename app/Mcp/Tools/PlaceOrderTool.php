@@ -79,7 +79,7 @@ class PlaceOrderTool extends TradingTool
             'ticker' => ['required', 'string', 'max:64'],
             'type' => ['required', 'string', Rule::enum(OrderType::class)],
             'side' => ['required', 'string', Rule::enum(OrderSide::class)],
-            'quantity' => ['required', 'numeric', 'gt:0'],
+            'quantity' => ['required', 'numeric', 'gt:0', 'decimal:0,8'],
             'limit_price' => ['nullable', 'numeric', 'gt:0', 'prohibited_unless:type,LIMIT,STOP_LIMIT'],
             'stop_price' => ['nullable', 'numeric', 'gt:0', 'prohibited_unless:type,STOP,STOP_LIMIT'],
             'time_validity' => ['nullable', 'string', Rule::enum(TimeValidity::class)],

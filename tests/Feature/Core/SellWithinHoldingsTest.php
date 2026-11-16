@@ -104,6 +104,72 @@ test('open sell orders reduce the quantity that can be sold', function () {
         && (float) $request['quantity'] === -4.0);
 });
 
+test('an open sell order with only an instrument ticker reduces the quantity that can be sold', function () {
+    fakeHoldings(
+        [['instrument' => ['ticker' => 'VODl_EQ'], 'quantity' => 10, 'quantityAvailableForTrading' => 10]],
+        [['id' => 1, 'instrument' => ['ticker' => 'VODl_EQ'], 'side' => 'SELL', 'quantity' => -7, 'filledQuantity' => 0]],
+    );
+
+    expect(fn () => app(PlaceOrder::class)->handle($this->account, limitSell(4), $this->agent))
+        ->toThrow(AgentNotAuthorizedException::class, 'exceeds the 3 share(s) available');
+    assertNoOrderPosted();
+});
+
+test('an open order without a recognised side counts as a sell', function (array $pendingOrder) {
+    fakeHoldings(
+        [['instrument' => ['ticker' => 'VODl_EQ'], 'quantity' => 10, 'quantityAvailableForTrading' => 10]],
+        [['id' => 1, 'ticker' => 'VODl_EQ', 'filledQuantity' => 0, ...$pendingOrder]],
+    );
+
+    expect(fn () => app(PlaceOrder::class)->handle($this->account, limitSell(5), $this->agent))
+        ->toThrow(AgentNotAuthorizedException::class, 'exceeds the 4 share(s) available');
+    assertNoOrderPosted();
+})->with([
+    'missing side, negative quantity' => [['quantity' => -6]],
+    'missing side, positive quantity' => [['quantity' => 6]],
+    'unrecognised side' => [['side' => 'SHORT', 'quantity' => 6]],
+]);
+
+test('an open order side is compared case-insensitively', function () {
+    fakeHoldings(
+        [['instrument' => ['ticker' => 'VODl_EQ'], 'quantity' => 10, 'quantityAvailableForTrading' => 10]],
+        [
+            ['id' => 1, 'ticker' => 'VODl_EQ', 'side' => 'sell', 'quantity' => -6, 'filledQuantity' => 0],
+            ['id' => 2, 'ticker' => 'VODl_EQ', 'side' => 'buy', 'quantity' => 50, 'filledQuantity' => 0],
+        ],
+    );
+
+    expect(fn () => app(PlaceOrder::class)->handle($this->account, limitSell(5), $this->agent))
+        ->toThrow(AgentNotAuthorizedException::class, 'exceeds the 4 share(s) available');
+    assertNoOrderPosted();
+});
+
+test('a sell is denied when no shares are available for trading', function () {
+    fakeHoldings([
+        ['instrument' => ['ticker' => 'VODl_EQ'], 'quantity' => 10, 'quantityAvailableForTrading' => 0],
+    ]);
+
+    expect(fn () => app(PlaceOrder::class)->handle($this->account, limitSell(1e-10), $this->agent))
+        ->toThrow(AgentNotAuthorizedException::class, 'exceeds the 0 share(s) available');
+    assertNoOrderPosted();
+});
+
+test('tickers are matched case-insensitively against holdings and open orders', function () {
+    fakeHoldings(
+        [['instrument' => ['ticker' => 'VODl_EQ'], 'quantity' => 10, 'quantityAvailableForTrading' => 10]],
+        [['id' => 1, 'ticker' => 'vodl_eq', 'side' => 'SELL', 'quantity' => -6, 'filledQuantity' => 0]],
+    );
+
+    expect(fn () => app(PlaceOrder::class)->handle($this->account, limitSell(5, 'VODL_EQ'), $this->agent))
+        ->toThrow(AgentNotAuthorizedException::class, 'exceeds the 4 share(s) available');
+    assertNoOrderPosted();
+
+    app(PlaceOrder::class)->handle($this->account, limitSell(4, 'VODL_EQ'), $this->agent);
+
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+        && (float) $request['quantity'] === -4.0);
+});
+
 test('a sell is denied when positions cannot be fetched', function () {
     Http::fake([
         'demo.trading212.com/api/v0/equity/positions' => Http::response(['code' => 'InternalError'], 500),

@@ -101,7 +101,7 @@ class AuthorizeAgentOrder
 
         $sellableQuantity = $this->sellableQuantity($account, $order->ticker);
 
-        if ($order->quantity > $sellableQuantity + self::QUANTITY_TOLERANCE) {
+        if ($sellableQuantity <= 0 || $order->quantity > $sellableQuantity + self::QUANTITY_TOLERANCE) {
             $roundedSellable = round($sellableQuantity, 6);
 
             $this->deny(
@@ -133,7 +133,7 @@ class AuthorizeAgentOrder
             $this->deny("Trading 212 returned malformed positions or open orders, so the sell of {$ticker} cannot be checked.");
         }
 
-        $position = collect($positions)->first(fn (mixed $heldPosition): bool => $this->tickerOf($heldPosition) === $ticker);
+        $position = collect($positions)->first(fn (mixed $heldPosition): bool => $this->isSameTicker($this->tickerOf($heldPosition), $ticker));
 
         if ($position === null) {
             $this->deny("{$ticker} is not held, so it cannot be sold.");
@@ -169,7 +169,7 @@ class AuthorizeAgentOrder
                 $this->deny("Trading 212 returned a malformed open order, so the sell of {$ticker} cannot be checked.");
             }
 
-            if ($orderTicker !== $ticker) {
+            if (! $this->isSameTicker($orderTicker, $ticker)) {
                 continue;
             }
 
@@ -180,14 +180,31 @@ class AuthorizeAgentOrder
                 $this->deny("Trading 212 returned a malformed open order for {$ticker}, so the sell cannot be checked.");
             }
 
-            $isSell = ($pendingOrder['side'] ?? null) === OrderSide::Sell->value || (float) $quantity < 0;
-
-            if ($isSell) {
+            if ($this->isOpenSell($pendingOrder['side'] ?? null, (float) $quantity)) {
                 $openSellQuantity += max(0.0, abs((float) $quantity) - abs((float) $filledQuantity));
             }
         }
 
         return $openSellQuantity;
+    }
+
+    /**
+     * Whether an open order reserves shares. A side that is missing or not recognised counts as a sell
+     * (as does a negative quantity), so unknown orders over-reserve and the check fails closed.
+     */
+    private function isOpenSell(mixed $side, float $quantity): bool
+    {
+        $normalisedSide = is_string($side) ? OrderSide::tryFrom(strtoupper(trim($side))) : null;
+
+        return $normalisedSide !== OrderSide::Buy || $quantity < 0;
+    }
+
+    /**
+     * Trading 212 tickers are compared case-insensitively, so a ticker sent in another case still matches the holding.
+     */
+    private function isSameTicker(?string $ticker, string $otherTicker): bool
+    {
+        return $ticker !== null && strcasecmp($ticker, $otherTicker) === 0;
     }
 
     /**

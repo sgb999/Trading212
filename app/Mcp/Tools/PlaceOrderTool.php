@@ -24,7 +24,13 @@ use Laravel\Mcp\Server\Tools\Annotations\IsDestructive;
     Place a BUY or SELL order on a Trading 212 account.
     Always pass a POSITIVE quantity; use side=SELL to sell (it is sent to Trading 212 as a negative quantity).
     type: MARKET (executes immediately at market price; extended_hours allowed), LIMIT (requires limit_price),
-    STOP (requires stop_price), STOP_LIMIT (requires both).
+    STOP (requires stop_price), STOP_LIMIT (requires both). Do not send a price the order type does not use.
+    limit_price and stop_price are in the INSTRUMENT's currency (see currencyCode from search-instruments):
+    LSE shares quoted in GBX are priced in PENCE (412 = £4.12), not pounds.
+    A role's max order value is in GBP; with one set, only GBP and GBX instruments may be traded, and orders are
+    valued at their worst-case price: MARKET at the held position's current price, LIMIT at the limit,
+    STOP_LIMIT at the higher of limit and stop, STOP at the higher of stop and current price (STOP needs a held
+    position for that; otherwise use STOP_LIMIT).
     time_validity (DAY or GOOD_TILL_CANCEL) applies to non-market orders. On a LIVE account this trades REAL money.
     Your role's permissions and limits (see get-my-permissions) are enforced; violations are rejected and logged.
     TEXT)]
@@ -51,9 +57,9 @@ class PlaceOrderTool extends TradingTool
                 )
                 ->required(),
             'limit_price' => $schema->number()->min(0)
-                ->description('Limit price per share. Required for LIMIT and STOP_LIMIT.'),
+                ->description('Limit price per share, in the instrument currency (pence for GBX). Required for LIMIT and STOP_LIMIT.'),
             'stop_price' => $schema->number()->min(0)
-                ->description('Stop (trigger) price per share. Required for STOP and STOP_LIMIT.'),
+                ->description('Stop (trigger) price per share, in the instrument currency (pence for GBX). Required for STOP and STOP_LIMIT.'),
             'time_validity' => $schema->string()
                 ->enum(TimeValidity::class)
                 ->default(TimeValidity::Day->value)
@@ -71,8 +77,8 @@ class PlaceOrderTool extends TradingTool
             'type' => ['required', 'string', Rule::enum(OrderType::class)],
             'side' => ['required', 'string', Rule::enum(OrderSide::class)],
             'quantity' => ['required', 'numeric', 'gt:0'],
-            'limit_price' => ['nullable', 'numeric', 'gt:0'],
-            'stop_price' => ['nullable', 'numeric', 'gt:0'],
+            'limit_price' => ['nullable', 'numeric', 'gt:0', 'prohibited_unless:type,LIMIT,STOP_LIMIT'],
+            'stop_price' => ['nullable', 'numeric', 'gt:0', 'prohibited_unless:type,STOP,STOP_LIMIT'],
             'time_validity' => ['nullable', 'string', Rule::enum(TimeValidity::class)],
             'extended_hours' => ['nullable', 'boolean'],
         ]);

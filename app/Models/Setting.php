@@ -2,7 +2,9 @@
 
 namespace App\Models;
 
+use Database\Factories\SettingFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
 /**
@@ -15,8 +17,11 @@ use Illuminate\Database\Eloquent\Model;
 #[Fillable(['key', 'value'])]
 class Setting extends Model
 {
+    /** @use HasFactory<SettingFactory> */
+    use HasFactory;
+
     /**
-     * Global kill switch: while true, every AI agent order is denied.
+     * Global kill switch: while true, every AI agent order and cancellation is denied.
      */
     public const string AGENT_TRADING_HALTED = 'agent_trading_halted';
 
@@ -40,9 +45,23 @@ class Setting extends Model
         static::query()->updateOrCreate(['key' => $key], ['value' => $value]);
     }
 
+    /**
+     * Fails closed: a missing row means not halted, but any stored value that is not recognisably
+     * false (e.g. 1, "true", null, an array or garbage) means halted.
+     */
     public static function isAgentTradingHalted(): bool
     {
-        return static::valueOf(self::AGENT_TRADING_HALTED, false) === true;
+        $setting = static::query()->where('key', self::AGENT_TRADING_HALTED)->first();
+
+        if ($setting === null) {
+            return false;
+        }
+
+        if (! is_scalar($setting->value)) {
+            return true;
+        }
+
+        return filter_var($setting->value, FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE) !== false;
     }
 
     public static function setAgentTradingHalted(bool $halted): void

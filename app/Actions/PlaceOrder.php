@@ -14,7 +14,6 @@ use App\Models\User;
 use App\Services\Trading212\Exceptions\OrderInProgressException;
 use App\Services\Trading212\Exceptions\OrderOutcomeUnknownException;
 use App\Services\Trading212\Exceptions\Trading212Exception;
-use Illuminate\Support\Facades\Log;
 use App\Services\Trading212\Exceptions\UnresolvedOrderException;
 use App\Services\Trading212\Trading212Client;
 use Illuminate\Cache\ArrayStore;
@@ -27,6 +26,7 @@ use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Contracts\Cache\Store;
 use Illuminate\Database\Connection;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use LogicException;
 
 /**
@@ -104,8 +104,8 @@ class PlaceOrder
 
                 throw new AgentNotAuthorizedException('AI agent trading is halted by the global kill switch.');
             }
+        }
 
-            $this->authorizeAgentOrder->handle($actor, $account, $order);
         self::ensureNotInTransaction();
 
         $lock = self::lockFor($account);

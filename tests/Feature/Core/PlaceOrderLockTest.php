@@ -154,6 +154,9 @@ test('the lock is held while authorising and placing, and released after success
     $agent = lockedTrader($account, ['max_order_value' => 1_000]);
     $lockWasHeld = [];
     Http::fake([
+        'demo.trading212.com/api/v0/equity/metadata/instruments' => Http::response([
+            ['ticker' => 'AAPL_US_EQ', 'currencyCode' => 'GBP'],
+        ]),
         'demo.trading212.com/api/v0/equity/positions*' => function () use ($account, &$lockWasHeld) {
             $lockWasHeld['authorisation'] = ! orderLockIsFree($account);
 
@@ -256,6 +259,9 @@ test('an agent order whose lock lapses during authorisation is refused before it
     $account = TradingAccount::factory()->create();
     $agent = lockedTrader($account, ['max_order_value' => 1_000]);
     Http::fake([
+        'demo.trading212.com/api/v0/equity/metadata/instruments' => Http::response([
+            ['ticker' => 'AAPL_US_EQ', 'currencyCode' => 'GBP'],
+        ]),
         'demo.trading212.com/api/v0/equity/positions*' => function () use ($account) {
             lapseOrderLockToAnotherProcess($account);
 

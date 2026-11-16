@@ -19,6 +19,11 @@ use App\Services\Trading212\Exceptions\Trading212Exception;
 class AuthorizeAgentOrder
 {
     /**
+     * Tolerance when comparing fractional share quantities, so float rounding cannot deny a sell of exactly the holding.
+     */
+    private const float QUANTITY_TOLERANCE = 1e-9;
+
+    /**
      * @throws AgentNotAuthorizedException
      */
     public function handle(AiAgent $agent, TradingAccount $account, OrderRequest $order): void
@@ -30,6 +35,7 @@ class AuthorizeAgentOrder
         $this->ensureWithinMaxQuantity($agent->role, $order);
         $this->ensureWithinMaxValue($agent->role, $account, $order);
         $this->ensureWithinDailyOrderLimit($agent);
+        $this->ensureSellWithinHoldings($account, $order);
     }
 
     /**
@@ -80,6 +86,122 @@ class AuthorizeAgentOrder
         if ($role->max_order_quantity !== null && $order->quantity > (float) $role->max_order_quantity) {
             $this->deny("Quantity {$order->quantity} exceeds the role's max of {$role->max_order_quantity}.");
         }
+    }
+
+    /**
+     * A sell may not exceed the shares that can still be sold, so an agent cannot oversell or open a short.
+     *
+     * @throws AgentNotAuthorizedException
+     */
+    private function ensureSellWithinHoldings(TradingAccount $account, OrderRequest $order): void
+    {
+        if ($order->side !== OrderSide::Sell) {
+            return;
+        }
+
+        $sellableQuantity = $this->sellableQuantity($account, $order->ticker);
+
+        if ($order->quantity > $sellableQuantity + self::QUANTITY_TOLERANCE) {
+            $roundedSellable = round($sellableQuantity, 6);
+
+            $this->deny(
+                "Sell quantity {$order->quantity} of {$order->ticker} exceeds the {$roundedSellable} share(s) available to sell "
+                .'(held shares not in pies, less open sell orders).'
+            );
+        }
+    }
+
+    /**
+     * Shares of the ticker that can still be sold: the lower of Trading 212's `quantityAvailableForTrading`
+     * (which excludes shares in pies) and the held quantity less the unfilled part of open sell orders.
+     *
+     * Taking the lower of both is correct whether or not Trading 212 already reserves shares for open sell orders.
+     * Every fetch or data problem denies, so the check fails closed.
+     *
+     * @throws AgentNotAuthorizedException
+     */
+    private function sellableQuantity(TradingAccount $account, string $ticker): float
+    {
+        try {
+            $positions = $account->client()->positions(fresh: true);
+            $pendingOrders = $account->client()->pendingOrders(fresh: true);
+        } catch (Trading212Exception) {
+            $this->deny("Positions or open orders could not be fetched to check how many shares of {$ticker} can be sold.");
+        }
+
+        if (! array_is_list($positions) || ! array_is_list($pendingOrders)) {
+            $this->deny("Trading 212 returned malformed positions or open orders, so the sell of {$ticker} cannot be checked.");
+        }
+
+        $position = collect($positions)->first(fn (mixed $heldPosition): bool => $this->tickerOf($heldPosition) === $ticker);
+
+        if ($position === null) {
+            $this->deny("{$ticker} is not held, so it cannot be sold.");
+        }
+
+        $heldQuantity = $position['quantity'] ?? null;
+        $availableQuantity = $position['quantityAvailableForTrading'] ?? null;
+
+        if (! is_numeric($heldQuantity) || ! is_numeric($availableQuantity)) {
+            $this->deny("Trading 212 returned a malformed position for {$ticker}, so the sell cannot be checked.");
+        }
+
+        $openSellQuantity = $this->openSellQuantity($pendingOrders, $ticker);
+
+        return max(0.0, min((float) $availableQuantity, (float) $heldQuantity - $openSellQuantity));
+    }
+
+    /**
+     * The unfilled quantity of every open sell order on the ticker.
+     *
+     * @param  list<mixed>  $pendingOrders
+     *
+     * @throws AgentNotAuthorizedException
+     */
+    private function openSellQuantity(array $pendingOrders, string $ticker): float
+    {
+        $openSellQuantity = 0.0;
+
+        foreach ($pendingOrders as $pendingOrder) {
+            $orderTicker = $this->tickerOf($pendingOrder);
+
+            if ($orderTicker === null) {
+                $this->deny("Trading 212 returned a malformed open order, so the sell of {$ticker} cannot be checked.");
+            }
+
+            if ($orderTicker !== $ticker) {
+                continue;
+            }
+
+            $quantity = $pendingOrder['quantity'] ?? null;
+            $filledQuantity = $pendingOrder['filledQuantity'] ?? 0;
+
+            if (! is_numeric($quantity) || ! is_numeric($filledQuantity)) {
+                $this->deny("Trading 212 returned a malformed open order for {$ticker}, so the sell cannot be checked.");
+            }
+
+            $isSell = ($pendingOrder['side'] ?? null) === OrderSide::Sell->value || (float) $quantity < 0;
+
+            if ($isSell) {
+                $openSellQuantity += max(0.0, abs((float) $quantity) - abs((float) $filledQuantity));
+            }
+        }
+
+        return $openSellQuantity;
+    }
+
+    /**
+     * The ticker of a position or order from Trading 212, which may sit at the top level or under `instrument`.
+     */
+    private function tickerOf(mixed $item): ?string
+    {
+        if (! is_array($item)) {
+            return null;
+        }
+
+        $ticker = $item['ticker'] ?? (is_array($item['instrument'] ?? null) ? ($item['instrument']['ticker'] ?? null) : null);
+
+        return is_string($ticker) && $ticker !== '' ? $ticker : null;
     }
 
     /**

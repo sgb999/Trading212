@@ -31,6 +31,8 @@ use Laravel\Mcp\Server\Tools\Annotations\IsDestructive;
     only GBP and GBX instruments may be bought, and buys are valued at their worst-case price: MARKET at the held position's current price, LIMIT at the limit,
     STOP_LIMIT at the higher of limit and stop, STOP at the higher of stop and current price (STOP needs a held
     position for that; otherwise use STOP_LIMIT).
+    A SELL may not exceed the shares you can still sell: the held quantity available for trading (excluding pies),
+    less the unfilled quantity of open SELL orders on that ticker. Selling an unheld ticker (shorting) is rejected.
     time_validity (DAY or GOOD_TILL_CANCEL) applies to non-market orders. On a LIVE account this trades REAL money.
     Your role's permissions and limits (see get-my-permissions) are enforced; violations are rejected and logged.
     TEXT)]

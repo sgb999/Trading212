@@ -16,7 +16,11 @@ use Illuminate\Support\Facades\Http;
 beforeEach(function () {
     Http::preventStrayRequests();
     Http::fake([
-        'demo.trading212.com/api/v0/equity/positions' => Http::response([]),
+        'demo.trading212.com/api/v0/equity/positions' => Http::response([
+            ['instrument' => ['ticker' => 'VODl_EQ'], 'quantity' => 100, 'quantityAvailableForTrading' => 100],
+            ['instrument' => ['ticker' => 'AAPL_US_EQ'], 'quantity' => 10, 'quantityAvailableForTrading' => 10],
+        ]),
+        'demo.trading212.com/api/v0/equity/orders' => Http::response([]),
         'demo.trading212.com/api/v0/equity/metadata/instruments' => Http::response([
             ['ticker' => 'VODl_EQ', 'currencyCode' => 'GBX'],
             ['ticker' => 'AAPL_US_EQ', 'currencyCode' => 'USD'],
@@ -55,11 +59,11 @@ test('a sell above the max order value is placed', function (OrderRequest $sell)
 })->with([
     'GBX limit sell' => fn () => new OrderRequest('VODl_EQ', OrderType::Limit, OrderSide::Sell, 100, limitPrice: 412),
     'USD limit sell' => fn () => new OrderRequest('AAPL_US_EQ', OrderType::Limit, OrderSide::Sell, 10, limitPrice: 200),
-    'market sell with no known price' => fn () => new OrderRequest('VODl_EQ', OrderType::Market, OrderSide::Sell, 100),
-    'stop sell with no held position' => fn () => new OrderRequest('VODl_EQ', OrderType::Stop, OrderSide::Sell, 100, stopPrice: 400),
+    'market sell' => fn () => new OrderRequest('VODl_EQ', OrderType::Market, OrderSide::Sell, 100),
+    'stop sell' => fn () => new OrderRequest('VODl_EQ', OrderType::Stop, OrderSide::Sell, 100, stopPrice: 400),
 ]);
 
-test('a sell does not look up the instrument currency or price', function () {
+test('a sell does not look up the instrument currency', function () {
     $account = TradingAccount::factory()->create();
 
     app(PlaceOrder::class)->handle(
@@ -69,7 +73,6 @@ test('a sell does not look up the instrument currency or price', function () {
     );
 
     Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '/metadata/instruments'));
-    Http::assertNotSent(fn (Request $request): bool => str_contains($request->url(), '/equity/positions'));
 });
 
 test('a buy above the max order value is still denied', function () {

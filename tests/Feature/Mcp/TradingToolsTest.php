@@ -30,7 +30,13 @@ function mcpTrader(TradingAccount $account, ?Role $role = null): AiAgent
 
 test('a market sell is sent with a negative quantity and Basic auth', function () {
     $agent = mcpTrader($this->account);
-    Http::fake(['demo.trading212.com/api/v0/equity/orders/market' => Http::response(['id' => 555, 'status' => 'NEW'])]);
+    Http::fake([
+        'demo.trading212.com/api/v0/equity/positions' => Http::response([
+            ['instrument' => ['ticker' => 'AAPL_US_EQ'], 'quantity' => 2, 'quantityAvailableForTrading' => 2],
+        ]),
+        'demo.trading212.com/api/v0/equity/orders' => Http::response([]),
+        'demo.trading212.com/api/v0/equity/orders/market' => Http::response(['id' => 555, 'status' => 'NEW']),
+    ]);
 
     TradingServer::tool(PlaceOrderTool::class, [
         'ticker' => 'AAPL_US_EQ',
@@ -54,6 +60,31 @@ test('a market sell is sent with a negative quantity and Basic auth', function (
         'outcome' => AgentActivityLog::OUTCOME_ALLOWED,
         'trading_account_id' => $this->account->id,
     ]);
+});
+
+test('a sell above the max order value but within holdings is accepted', function () {
+    mcpTrader($this->account, Role::factory()->trader()->create(['max_order_value' => 50]));
+    Http::fake([
+        'demo.trading212.com/api/v0/equity/positions' => Http::response([
+            ['instrument' => ['ticker' => 'VODl_EQ'], 'quantity' => 100, 'quantityAvailableForTrading' => 100],
+        ]),
+        'demo.trading212.com/api/v0/equity/orders' => Http::response([]),
+        'demo.trading212.com/api/v0/equity/orders/limit' => Http::response(['id' => 557, 'status' => 'NEW']),
+    ]);
+
+    TradingServer::tool(PlaceOrderTool::class, [
+        'ticker' => 'VODl_EQ',
+        'type' => 'LIMIT',
+        'side' => 'SELL',
+        'quantity' => 100,
+        'limit_price' => 412,
+    ])
+        ->assertOk()
+        ->assertStructuredContentPath('order.id', 557);
+
+    Http::assertSent(fn (HttpRequest $request): bool => $request->method() === 'POST'
+        && $request->url() === 'https://demo.trading212.com/api/v0/equity/orders/limit'
+        && (float) $request['quantity'] === -100.0);
 });
 
 test('a limit buy is sent with its limit price and time validity', function () {

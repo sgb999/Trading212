@@ -19,3 +19,9 @@ foreach (['08:05', '16:40'] as $snapshotTime) {
         ->timezone('Europe/London')
         ->onOneServer();
 }
+Schedule::command('trading212:sync')
+    ->everyMinute()
+    ->weekdays()
+    ->between('07:00', '17:00')
+    ->timezone('Europe/London')
+    ->withoutOverlapping(5);

@@ -21,6 +21,9 @@ class PortfolioSnapshotFactory extends Factory
 
         return [
             'trading_account_id' => TradingAccount::factory(),
+            'external_account_id' => fn (array $attributes) => TradingAccount::query()
+                ->whereKey($attributes['trading_account_id'])
+                ->value('external_account_id') ?? fake()->numberBetween(1_000_000, 9_999_999),
             'total_value' => $cash + $invested,
             'cash' => $cash,
             'invested' => $invested,

@@ -91,8 +91,9 @@ class TradingAccount extends Model
     }
 
     /**
-     * The account's first snapshot (its starting value). Set once by {@see RecordPortfolioSnapshot}
-     * and deliberately not fillable, so it is never overwritten.
+     * The stored baseline (first snapshot). Set once by {@see RecordPortfolioSnapshot} and deliberately not
+     * fillable; it is only replaced when the credentials switch to another Trading 212 account.
+     * Guards should use {@see self::baseline()}, which also checks the snapshot belongs to the current one.
      *
      * @return BelongsTo<PortfolioSnapshot, $this>
      */
@@ -102,11 +103,27 @@ class TradingAccount extends Model
     }
 
     /**
-     * The first snapshot taken today (Europe/London calendar day), if any.
+     * The baseline of the Trading 212 account the credentials currently point at, or null when there is
+     * none yet or it was taken from a different Trading 212 account (summary `id`).
+     */
+    public function baseline(): ?PortfolioSnapshot
+    {
+        $baseline = $this->baselineSnapshot;
+
+        if ($baseline === null || $this->external_account_id === null) {
+            return null;
+        }
+
+        return (int) $baseline->external_account_id === (int) $this->external_account_id ? $baseline : null;
+    }
+
+    /**
+     * The first snapshot taken today (Europe/London calendar day) of the current Trading 212 account, if any.
      */
     public function firstSnapshotToday(): ?PortfolioSnapshot
     {
         return $this->portfolioSnapshots()
+            ->where('external_account_id', $this->external_account_id ?? 0)
             ->takenOnLondonDay()
             ->oldest('taken_at')
             ->oldest('id')

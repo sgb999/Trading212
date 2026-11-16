@@ -11,6 +11,7 @@ return new class extends Migration
         Schema::create('portfolio_snapshots', function (Blueprint $table) {
             $table->id();
             $table->foreignId('trading_account_id')->constrained()->cascadeOnDelete();
+            $table->unsignedBigInteger('external_account_id');
             $table->decimal('total_value', 20, 4);
             $table->decimal('cash', 20, 4);
             $table->decimal('invested', 20, 4);

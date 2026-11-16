@@ -16,6 +16,7 @@ use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * Pulls the account summary, positions and pending orders of one Trading 212 account,
@@ -85,7 +86,15 @@ class SyncTradingAccount implements ShouldBeUnique, ShouldQueue
             'last_synced_at' => now(),
         ]);
 
-        app(RecordPortfolioSnapshot::class)->handle($account, $summary);
+        try {
+            app(RecordPortfolioSnapshot::class)->handle($account, $summary);
+        } catch (Throwable $e) {
+            Log::warning('Portfolio snapshot not recorded.', [
+                'trading_account_id' => $account->getKey(),
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
+        }
 
         $this->reconcileOrders($client, $pendingOrders);
 

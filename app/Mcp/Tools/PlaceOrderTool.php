@@ -33,6 +33,8 @@ use Laravel\Mcp\Server\Tools\Annotations\IsDestructive;
     position for that; otherwise use STOP_LIMIT).
     time_validity (DAY or GOOD_TILL_CANCEL) applies to non-market orders. On a LIVE account this trades REAL money.
     Your role's permissions and limits (see get-my-permissions) are enforced; violations are rejected and logged.
+    If the result is an "order_outcome_unknown" error, the order MAY have been placed: do not place it again.
+    It is reconciled at the next account sync; until then new orders for that ticker are refused.
     TEXT)]
 #[IsDestructive]
 class PlaceOrderTool extends TradingTool
@@ -53,7 +55,8 @@ class PlaceOrderTool extends TradingTool
             'quantity' => $schema->number()->min(0)
                 ->description(
                     'Number of shares '
-                    .'(positive; fractional allowed for market orders where the instrument supports it).'
+                    .'(positive, at most 8 decimal places; fractional allowed for market orders where the '
+                    .'instrument supports it).'
                 )
                 ->required(),
             'limit_price' => $schema->number()->min(0)

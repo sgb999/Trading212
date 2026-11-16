@@ -1,5 +1,6 @@
 <?php
 
+use App\Actions\PlaceOrder;
 use App\Enums\OrderSide;
 use App\Enums\OrderType;
 use App\Enums\TradeOrderStatus;
@@ -9,6 +10,7 @@ use App\Models\TradingAccount;
 use App\Models\User;
 use Filament\Forms\Components\Select;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Sleep;
 use Livewire\Livewire;
@@ -211,6 +213,20 @@ it('shows the Trading 212 error when the order is rejected', function () {
         ->assertNotified('Order rejected by Trading 212');
 
     expect(TradeOrder::sole()->error)->toContain('InsufficientFunds');
+});
+
+it('reports an order refused because another order holds the account lock', function () {
+    FakesTrading212::fake();
+    $account = TradingAccount::factory()->for($this->user)->default()->create();
+    Cache::store(config('trading212.cache_store'))->lock(PlaceOrder::lockKey($account), 60)->get();
+
+    Livewire::test(Trade::class)
+        ->fillForm(['ticker' => 'AAPL_US_EQ', 'side' => 'BUY', 'type' => 'MARKET', 'quantity' => 1])
+        ->callAction('placeOrder')
+        ->assertNotified('Order not placed: another order is in progress');
+
+    expect(orderRequests())->toBeEmpty()
+        ->and(TradeOrder::query()->count())->toBe(0);
 });
 
 it('disables ordering without a trading account', function () {

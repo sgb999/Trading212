@@ -27,6 +27,8 @@ use Laravel\Mcp\Server\Tools\Annotations\IsDestructive;
     STOP (requires stop_price), STOP_LIMIT (requires both).
     time_validity (DAY or GOOD_TILL_CANCEL) applies to non-market orders. On a LIVE account this trades REAL money.
     Your role's permissions and limits (see get-my-permissions) are enforced; violations are rejected and logged.
+    If your role has restrict_to_allowed_tickers=true and allowed_tickers is empty or null, no ticker is allowed:
+    every order is denied until the owner adds tickers.
     TEXT)]
 #[IsDestructive]
 class PlaceOrderTool extends TradingTool

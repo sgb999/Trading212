@@ -5,36 +5,31 @@ namespace Database\Seeders;
 use App\Enums\Permission;
 use App\Models\Role;
 use Illuminate\Database\Seeder;
-use Illuminate\Support\Arr;
 
 class RoleSeeder extends Seeder
 {
     /**
-     * Presets whose allowed tickers are filled in by the owner; re-seeding keeps a filled list.
+     * Presets the owner tunes by hand (tickers, TradeLive, limits): seeded once, never overwritten.
      *
      * @var list<string>
      */
-    private const array OWNER_FILLED_TICKER_ROLES = ['investor'];
+    private const array OWNER_MANAGED_ROLES = ['investor'];
 
     /**
-     * Seed the preset agent roles. Re-running restores edited presets and leaves custom roles untouched,
-     * except for allowed tickers the owner has filled in on an owner-filled preset.
+     * Seed the preset agent roles. Re-running restores edited presets and leaves custom roles untouched.
+     * Owner-managed presets are only created when missing; an existing one is left exactly as the owner set it.
      */
     public function run(): void
     {
         foreach ($this->roles() as $slug => $attributes) {
-            if ($this->hasOwnerFilledTickers($slug)) {
-                $attributes = Arr::except($attributes, 'allowed_tickers');
+            if (in_array($slug, self::OWNER_MANAGED_ROLES, true)) {
+                Role::query()->firstOrCreate(['slug' => $slug], $attributes);
+
+                continue;
             }
 
             Role::query()->updateOrCreate(['slug' => $slug], $attributes);
         }
-    }
-
-    private function hasOwnerFilledTickers(string $slug): bool
-    {
-        return in_array($slug, self::OWNER_FILLED_TICKER_ROLES, true)
-            && filled(Role::query()->where('slug', $slug)->first()?->allowed_tickers);
     }
 
     /**
@@ -43,10 +38,10 @@ class RoleSeeder extends Seeder
      *     description: string,
      *     permissions: list<string>,
      *     max_order_quantity: null,
-     *     max_order_value: float|int|null,
+     *     max_order_value: int|null,
      *     max_orders_per_day: int|null,
-     *     max_daily_loss_percent: float|int|null,
-     *     min_portfolio_value: float|int|null,
+     *     max_daily_loss_percent: int|null,
+     *     min_portfolio_value: int|null,
      *     allowed_tickers: null,
      *     restrict_to_allowed_tickers: bool,
      * }>

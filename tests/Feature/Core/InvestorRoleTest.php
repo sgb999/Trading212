@@ -3,6 +3,7 @@
 use App\Enums\Permission;
 use App\Mcp\CurrentAgent;
 use App\Mcp\Servers\TradingServer;
+use App\Mcp\Tools\GetMyPermissionsTool;
 use App\Mcp\Tools\PlaceOrderTool;
 use App\Models\AiAgent;
 use App\Models\PortfolioSnapshot;
@@ -114,13 +115,19 @@ test('an empty ticker list still allows any ticker on roles that do not restrict
         ->and($role->allowsTicker('AAPL_US_EQ'))->toBeTrue();
 });
 
-test('re-seeding is idempotent, restores edited limits and keeps the filled tickers', function () {
+test('re-seeding leaves an existing investor preset exactly as the owner edited it', function () {
     $investor = seededInvestor();
+    $ownerPermissions = [
+        ...array_map(fn (Permission $permission) => $permission->value, Permission::readOnly()),
+        Permission::PlaceLimitOrders->value,
+        Permission::Sell->value,
+        Permission::CancelOrders->value,
+        Permission::TradeLive->value,
+    ];
     $investor->update([
+        'permissions' => $ownerPermissions,
+        'max_order_value' => 40,
         'allowed_tickers' => ['VUSA_EQ', 'VWRL_EQ'],
-        'max_order_value' => 1000,
-        'restrict_to_allowed_tickers' => false,
-        'permissions' => array_map(fn (Permission $permission) => $permission->value, Permission::cases()),
     ]);
 
     $this->seed(RoleSeeder::class);
@@ -128,13 +135,27 @@ test('re-seeding is idempotent, restores edited limits and keeps the filled tick
 
     $reseeded = Role::query()->where('slug', 'investor')->sole();
 
-    expect(Role::query()->where('name', 'Investor')->count())->toBe(1)
+    expect(Role::query()->where('slug', 'investor')->count())->toBe(1)
         ->and($reseeded->id)->toBe($investor->id)
+        ->and($reseeded->permissions)->toEqualCanonicalizing($ownerPermissions)
+        ->and($reseeded->hasPermission(Permission::TradeLive))->toBeTrue()
+        ->and($reseeded->hasPermission(Permission::PlaceStopOrders))->toBeFalse()
+        ->and($reseeded->max_order_value)->toBe('40.00')
         ->and($reseeded->allowed_tickers)->toBe(['VUSA_EQ', 'VWRL_EQ'])
-        ->and($reseeded->max_order_value)->toBe('50.00')
-        ->and($reseeded->restrict_to_allowed_tickers)->toBeTrue()
-        ->and($reseeded->hasPermission(Permission::PlaceMarketOrders))->toBeFalse()
-        ->and($reseeded->hasPermission(Permission::TradeLive))->toBeFalse();
+        ->and($reseeded->restrict_to_allowed_tickers)->toBeTrue();
+});
+
+test('re-seeding recreates the investor preset with its defaults when it was deleted', function () {
+    seededInvestor()->delete();
+
+    $this->seed(RoleSeeder::class);
+
+    $recreated = Role::query()->where('slug', 'investor')->sole();
+
+    expect($recreated->max_order_value)->toBe('50.00')
+        ->and($recreated->hasPermission(Permission::TradeLive))->toBeFalse()
+        ->and($recreated->allowed_tickers)->toBeNull()
+        ->and($recreated->restrict_to_allowed_tickers)->toBeTrue();
 });
 
 test('re-seeding keeps the placeholder empty when the tickers were never filled in', function () {
@@ -231,3 +252,10 @@ test('an investor agent may place a limit buy of £50 on an allowed ticker', fun
         && $request->url() === 'https://demo.trading212.com/api/v0/equity/orders/limit');
     $this->assertDatabaseHas(TradeOrder::class, ['placed_by_id' => $agent->id, 'external_id' => 901]);
 });
+
+test('the permissions and place order tools tell agents an empty restricted ticker list allows no ticker', function (string $tool) {
+    expect(app($tool)->description())
+        ->toContain('restrict_to_allowed_tickers')
+        ->toContain('empty or null')
+        ->toMatch('/no ticker is allowed/i');
+})->with([GetMyPermissionsTool::class, PlaceOrderTool::class]);

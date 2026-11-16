@@ -15,10 +15,13 @@ use App\Models\Role;
 use App\Models\TradeOrder;
 use App\Models\TradingAccount;
 use App\Services\Trading212\Exceptions\OrderInProgressException;
+use App\Services\Trading212\Exceptions\OrderOutcomeUnknownException;
 use App\Services\Trading212\Exceptions\Trading212Exception;
 use App\Services\Trading212\Exceptions\UnresolvedOrderException;
 use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Sleep;
 
@@ -295,6 +298,98 @@ test('a same-ticker order is still refused when the lock lapses during the place
     Http::assertSentCount(1);
 });
 
+test('the lock is released after the outcome is left unknown, so the next order on another ticker succeeds', function (Closure $failure) {
+    $account = TradingAccount::factory()->create();
+    $agent = lockedTrader($account);
+    Http::fake([
+        'demo.trading212.com/api/v0/equity/orders/market' => function ($request) use ($failure) {
+            return $request['ticker'] === 'AAPL_US_EQ' ? $failure() : Http::response(['id' => 3, 'status' => 'NEW']);
+        },
+    ]);
+
+    expect(fn () => app(PlaceOrder::class)->handle($account, lockedMarketBuy(), $agent))
+        ->toThrow(OrderOutcomeUnknownException::class);
+    expect(orderLockIsFree($account))->toBeTrue();
+
+    $tradeOrder = app(PlaceOrder::class)->handle($account, lockedMarketBuy('MSFT_US_EQ'), $agent);
+
+    expect($tradeOrder->external_id)->toBe(3);
+})->with([
+    'server error' => [fn () => fn () => Http::response(['message' => 'Bad gateway'], 502)],
+    'timeout' => [fn () => fn () => throw new ConnectionException('cURL error 28: Operation timed out')],
+]);
+
+test('the lock is released after an order is refused for an unresolved ticker', function () {
+    Http::fake();
+    $account = TradingAccount::factory()->create();
+    TradeOrder::factory()->for($account)->create(['ticker' => 'AAPL_US_EQ', 'status' => TradeOrderStatus::Unknown]);
+
+    expect(fn () => app(PlaceOrder::class)->handle($account, lockedMarketBuy(), $account->user))
+        ->toThrow(UnresolvedOrderException::class);
+
+    expect(orderLockIsFree($account))->toBeTrue();
+    Http::assertNothingSent();
+});
+
+test('a user order whose lock lapses during the unresolved-ticker check is refused before it is saved or sent', function () {
+    Http::fake();
+    $account = TradingAccount::factory()->create();
+    $hasLapsed = false;
+    DB::listen(function ($query) use ($account, &$hasLapsed): void {
+        if (! $hasLapsed && str_contains($query->sql, 'trade_orders')) {
+            $hasLapsed = true;
+            lapseOrderLockToAnotherProcess($account);
+        }
+    });
+
+    expect(fn () => app(PlaceOrder::class)->handle($account, lockedMarketBuy(), $account->user))
+        ->toThrow(OrderInProgressException::class, OrderInProgressException::lockLapsedMessage());
+
+    Http::assertNothingSent();
+    expect($hasLapsed)->toBeTrue()
+        ->and(TradeOrder::query()->count())->toBe(0);
+});
+
+test('outside the testing environment an order is refused when the lock store is not shared', function (string $cacheStore) {
+    Http::fake();
+    app()->detectEnvironment(fn (): string => 'production');
+    config(['cache.stores.null' => ['driver' => 'null'], 'trading212.cache_store' => $cacheStore]);
+    $account = TradingAccount::factory()->create();
+
+    expect(fn () => app(PlaceOrder::class)->handle($account, lockedMarketBuy(), lockedTrader($account)))
+        ->toThrow(LogicException::class, 'is not shared between processes');
+
+    Http::assertNothingSent();
+    expect(TradeOrder::query()->count())->toBe(0);
+})->with([
+    'array store' => ['array'],
+    'null store' => ['null'],
+    'failover store falling back to array' => ['failover'],
+]);
+
+test('outside the testing environment an order is placed when the lock store is shared', function () {
+    Http::fake(['demo.trading212.com/api/v0/equity/orders/market' => Http::response(['id' => 4, 'status' => 'NEW'])]);
+    app()->detectEnvironment(fn (): string => 'production');
+    config(['trading212.cache_store' => 'database']);
+    $account = TradingAccount::factory()->create();
+
+    $tradeOrder = app(PlaceOrder::class)->handle($account, lockedMarketBuy(), $account->user);
+
+    expect($tradeOrder->external_id)->toBe(4);
+});
+
+test('an order placed inside a database transaction is refused before anything is sent', function () {
+    Http::fake();
+    $account = TradingAccount::factory()->create();
+
+    expect(fn () => DB::transaction(fn () => app(PlaceOrder::class)->handle($account, lockedMarketBuy(), $account->user)))
+        ->toThrow(LogicException::class, 'inside a database transaction');
+
+    Http::assertNothingSent();
+    expect(TradeOrder::query()->count())->toBe(0)
+        ->and(orderLockIsFree($account))->toBeTrue();
+});
+
 test('the lock lifetime is derived from the configured API budget', function () {
     config([
         'trading212.timeout' => 15,
@@ -308,4 +403,19 @@ test('the lock lifetime is derived from the configured API budget', function () 
     config(['trading212.timeout' => 30, 'trading212.order_lock.max_api_calls' => 3]);
 
     expect(PlaceOrder::lockTtlSeconds())->toBe(3 * 2 * (10 + 30) + 60);
+});
+
+test('the lock lifetime never drops below one attempt plus a margin when the budget is zeroed', function () {
+    config([
+        'trading212.timeout' => 15,
+        'trading212.max_wait_seconds' => 10,
+        'trading212.order_lock.max_api_calls' => 0,
+        'trading212.order_lock.margin_seconds' => 0,
+    ]);
+
+    expect(PlaceOrder::lockTtlSeconds())->toBe(10 + 15 + 30);
+
+    config(['trading212.timeout' => 0, 'trading212.max_wait_seconds' => 0]);
+
+    expect(PlaceOrder::lockTtlSeconds())->toBe(30);
 });

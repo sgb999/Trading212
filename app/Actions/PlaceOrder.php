@@ -15,9 +15,15 @@ use App\Services\Trading212\Exceptions\OrderOutcomeUnknownException;
 use App\Services\Trading212\Exceptions\Trading212Exception;
 use App\Services\Trading212\Exceptions\UnresolvedOrderException;
 use App\Services\Trading212\Trading212Client;
+use Illuminate\Cache\ArrayStore;
+use Illuminate\Cache\DatabaseLock;
+use Illuminate\Cache\FailoverStore;
 use Illuminate\Cache\Lock;
+use Illuminate\Cache\NullStore;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Contracts\Cache\Store;
+use Illuminate\Database\Connection;
 use Illuminate\Support\Facades\Cache;
 use LogicException;
 
@@ -50,6 +56,12 @@ use LogicException;
  * lapse during the POST cannot let a second order on the same ticker through. It does not protect a
  * different ticker: a second order on another ticker could then be authorised against an account
  * summary or positions that do not yet reflect the in-flight order.
+ *
+ * The lock fails closed: outside the `testing` environment an order is refused with a
+ * {@see LogicException} when the lock's store is not shared between processes (an array or null
+ * store, or a failover store that can fall back to one), and in every environment when it is
+ * called inside an open database transaction, where the database lock row and the `sending` row
+ * would be invisible to other processes until commit.
  */
 class PlaceOrder
 {
@@ -63,6 +75,11 @@ class PlaceOrder
      */
     private const int ATTEMPTS_PER_API_CALL = 2;
 
+    /**
+     * Seconds the lock outlives one attempt of one API call at the least, whatever the config says.
+     */
+    private const int MIN_LOCK_MARGIN_SECONDS = 30;
+
     public function __construct(private readonly AuthorizeAgentOrder $authorizeAgentOrder) {}
 
     /**
@@ -71,9 +88,12 @@ class PlaceOrder
      * @throws UnresolvedOrderException
      * @throws OrderOutcomeUnknownException
      * @throws Trading212Exception
+     * @throws LogicException When the lock store is not shared, or inside a database transaction.
      */
     public function handle(TradingAccount $account, OrderRequest $order, User|AiAgent $actor): TradeOrder
     {
+        self::ensureNotInTransaction();
+
         $lock = self::lockFor($account);
 
         try {
@@ -95,11 +115,20 @@ class PlaceOrder
     }
 
     /**
-     * The account's order lock on the trading212 cache store, which must support atomic locks.
+     * The account's order lock on the trading212 cache store, which must support atomic locks and,
+     * outside the `testing` environment, be shared between processes.
+     *
+     * @throws LogicException
      */
     private static function lockFor(TradingAccount $account): Lock
     {
-        $store = Cache::store(config('trading212.cache_store'))->getStore();
+        $storeName = config('trading212.cache_store') ?? config('cache.default');
+        $store = Cache::store($storeName)->getStore();
+
+        if (! app()->environment('testing')) {
+            self::ensureSharedStore($store, $storeName);
+        }
+
         $lock = $store instanceof LockProvider ? $store->lock(self::lockKey($account), self::lockTtlSeconds()) : null;
 
         if (! $lock instanceof Lock) {
@@ -107,6 +136,42 @@ class PlaceOrder
         }
 
         return $lock;
+    }
+
+    /**
+     * Refuses a store whose locks live only in this process (array or null), including any store a
+     * failover store may fall back to, as such a lock would never block another process.
+     *
+     * @throws LogicException
+     */
+    private static function ensureSharedStore(Store $store, string $storeName): void
+    {
+        if ($store instanceof ArrayStore || $store instanceof NullStore) {
+            throw new LogicException(
+                "The trading212 cache store [{$storeName}] is not shared between processes, so it cannot lock order placement."
+            );
+        }
+
+        if ($store instanceof FailoverStore) {
+            foreach ((array) config("cache.stores.{$storeName}.stores", []) as $fallbackName) {
+                self::ensureSharedStore(Cache::store($fallbackName)->getStore(), $fallbackName);
+            }
+        }
+    }
+
+    /**
+     * Refuses to place an order inside an open database transaction: the database lock row and the
+     * `sending` row would be invisible to other processes until commit. The transaction manager is
+     * used rather than {@see Connection::transactionLevel()} so the
+     * transaction that wraps each test is not counted.
+     *
+     * @throws LogicException
+     */
+    private static function ensureNotInTransaction(): void
+    {
+        if (app('db.transactions')->callbackApplicableTransactions()->isNotEmpty()) {
+            throw new LogicException('Orders must not be placed inside a database transaction.');
+        }
     }
 
     /**
@@ -119,13 +184,22 @@ class PlaceOrder
      * max_api_calls` budgets every call authorisation and placement can make (price, positions,
      * pending orders and account summary lookups, plus the placement itself), and the margin covers
      * the database work. With the defaults: 6 x 2 x (10 + 15) + 60 = 360 seconds.
+     *
+     * The budget of 6 calls is deliberately above what this branch makes, leaving room for the
+     * holdings check (hotfix/4) and the loss guard (feature/8), which each add calls once merged.
+     *
+     * The result is never below `max_wait_seconds + timeout + MIN_LOCK_MARGIN_SECONDS`, so zeroed
+     * config cannot produce 0, which {@see DatabaseLock} would treat as a
+     * lifetime of one day.
      */
     public static function lockTtlSeconds(): int
     {
-        $secondsPerAttempt = (int) config('trading212.max_wait_seconds') + (int) config('trading212.timeout');
+        $secondsPerAttempt = max(0, (int) config('trading212.max_wait_seconds')) + max(0, (int) config('trading212.timeout'));
 
-        return (int) config('trading212.order_lock.max_api_calls') * self::ATTEMPTS_PER_API_CALL * $secondsPerAttempt
-            + (int) config('trading212.order_lock.margin_seconds');
+        $budgetedSeconds = max(0, (int) config('trading212.order_lock.max_api_calls')) * self::ATTEMPTS_PER_API_CALL * $secondsPerAttempt
+            + max(0, (int) config('trading212.order_lock.margin_seconds'));
+
+        return max($budgetedSeconds, $secondsPerAttempt + self::MIN_LOCK_MARGIN_SECONDS);
     }
 
     /**

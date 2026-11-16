@@ -8,6 +8,7 @@ use App\Enums\OrderSide;
 use App\Enums\OrderType;
 use App\Enums\TimeValidity;
 use App\Filament\Concerns\InteractsWithTradingAccount;
+use App\Services\Trading212\Exceptions\OrderInProgressException;
 use App\Services\Trading212\Exceptions\OrderOutcomeUnknownException;
 use App\Services\Trading212\Exceptions\Trading212Exception;
 use App\Services\Trading212\Exceptions\UnresolvedOrderException;
@@ -235,6 +236,15 @@ class Trade extends Page
             Notification::make()
                 ->warning()
                 ->title('Order outcome unknown')
+                ->body($e->getMessage())
+                ->persistent()
+                ->send();
+
+            return;
+        } catch (OrderInProgressException $e) {
+            Notification::make()
+                ->danger()
+                ->title('Order not placed: another order is in progress')
                 ->body($e->getMessage())
                 ->persistent()
                 ->send();

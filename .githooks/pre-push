@@ -3,11 +3,26 @@
 # Bypass in an emergency with: git push --no-verify
 set -euo pipefail
 
+# Flatpak git clients (e.g. GitFourchette) run hooks in a sandbox where Flock's binaries can't execute.
+# Re-run this hook on the host. Sandbox GIT_* variables are dropped because they point at /app paths.
+if [ -f /.flatpak-info ] && command -v flatpak-spawn >/dev/null 2>&1; then
+    exec flatpak-spawn --host --directory="$PWD" "$0" "$@"
+fi
+
+# GUI git clients don't source ~/.bashrc, so add the Flock (php, node) and pnpm shims explicitly.
+for dir in "$HOME/.local/share/pnpm/bin" "$HOME/.local/share/flock/node-global/current/bin" "$HOME/.local/share/flock/bin"; do
+    if [ -d "$dir" ]; then
+        PATH="$dir:$PATH"
+    fi
+done
+export PATH
+
 cd "$(git rev-parse --show-toplevel)"
 
 echo "pre-push: running server tests (Unit + Feature)..."
 php artisan config:clear --quiet
-vendor/bin/pest tests/Unit tests/Feature --compact
+# No path arguments: phpunit.xml's suites are Unit + Feature, and --parallel rejects multiple paths.
+vendor/bin/pest --parallel --compact --tia
 
 echo "pre-push: building assets for browser tests..."
 pnpm run build >/dev/null

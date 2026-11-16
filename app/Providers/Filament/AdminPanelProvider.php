@@ -31,6 +31,7 @@ class AdminPanelProvider extends PanelProvider
             ->id('admin')
             ->path('')
             ->login()
+            ->profile()
             ->brandName('Trading Platform')
             ->colors([
                 'primary' => Color::Emerald,

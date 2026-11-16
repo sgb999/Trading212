@@ -3,7 +3,9 @@ name: Tests
 on:
   push:
     branches: [main, master]
+    paths-ignore: ['**.md', 'docs/**']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**']
 
 concurrency:
   group: tests-${{ github.ref }}
@@ -22,17 +24,15 @@ env:
 jobs:
   server:
     name: Server tests (Unit + Feature)
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
 
-      # ubuntu-slim is a container runner with no Docker, so service containers are unavailable.
+      # PostgreSQL is preinstalled on ubuntu-latest; it only needs starting.
       - name: Start PostgreSQL
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql
-          sudo service postgresql start
+          sudo systemctl start postgresql.service
           sudo -u postgres psql -c "ALTER USER postgres PASSWORD '${DB_PASSWORD}';"
           sudo -u postgres createdb "${DB_DATABASE}"
 
@@ -55,16 +55,15 @@ jobs:
 
   browser:
     name: Browser tests
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
+      # PostgreSQL is preinstalled on ubuntu-latest; it only needs starting.
       - name: Start PostgreSQL
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql
-          sudo service postgresql start
+          sudo systemctl start postgresql.service
           sudo -u postgres psql -c "ALTER USER postgres PASSWORD '${DB_PASSWORD}';"
           sudo -u postgres createdb "${DB_DATABASE}"
 
@@ -89,8 +88,21 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Get Playwright version
+        id: playwright
+        run: echo "version=$(pnpm exec playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      # Chromium's system libraries ship with ubuntu-latest (Chrome is preinstalled), so --with-deps is unnecessary.
       - name: Install Playwright Chromium
-        run: pnpm exec playwright install --with-deps chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm exec playwright install chromium
 
       - name: Build assets
         run: pnpm run build

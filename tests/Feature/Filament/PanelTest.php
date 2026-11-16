@@ -5,6 +5,8 @@ use App\Filament\Support\ActiveTradingAccount;
 use App\Livewire\TradingAccountSwitcher;
 use App\Models\TradingAccount;
 use App\Models\User;
+use Filament\Auth\Pages\EditProfile;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Route;
 use Livewire\Livewire;
 use Tests\Feature\Filament\FakesTrading212;
@@ -103,4 +105,38 @@ it('ignores a session selection pointing at another user\'s account', function (
     session([ActiveTradingAccount::SESSION_KEY => $foreign->id]);
 
     expect(ActiveTradingAccount::get()->is($mine))->toBeTrue();
+});
+
+it('lets a user change their password from the profile page', function () {
+    $user = User::factory()->create(['password' => 'old-password']);
+
+    $this->actingAs($user)->get(EditProfile::getUrl())->assertOk();
+
+    Livewire::test(EditProfile::class)
+        ->fillForm([
+            'password' => 'new-password-123',
+            'passwordConfirmation' => 'new-password-123',
+            'currentPassword' => 'old-password',
+        ])
+        ->call('save')
+        ->assertHasNoFormErrors();
+
+    expect(Hash::check('new-password-123', $user->refresh()->password))->toBeTrue();
+});
+
+it('rejects a password change without the correct current password', function () {
+    $user = User::factory()->create(['password' => 'old-password']);
+
+    $this->actingAs($user);
+
+    Livewire::test(EditProfile::class)
+        ->fillForm([
+            'password' => 'new-password-123',
+            'passwordConfirmation' => 'new-password-123',
+            'currentPassword' => 'wrong-password',
+        ])
+        ->call('save')
+        ->assertHasFormErrors(['currentPassword']);
+
+    expect(Hash::check('old-password', $user->refresh()->password))->toBeTrue();
 });

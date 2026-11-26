@@ -5,13 +5,14 @@ namespace App\Models;
 use App\Actions\RecordPortfolioSnapshot;
 use App\Enums\Trading212Environment;
 use App\Services\Trading212\Trading212Client;
+use App\Traits\BelongsToManyAgentsTrait;
+use App\Traits\BelongsToUserTrait;
 use Database\Factories\TradingAccountFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
@@ -31,6 +32,9 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 #[Hidden(['api_key', 'api_secret'])]
 class TradingAccount extends Model
 {
+    use BelongsToManyAgentsTrait;
+    use BelongsToUserTrait;
+
     /** @use HasFactory<TradingAccountFactory> */
     use HasFactory;
 
@@ -64,14 +68,6 @@ class TradingAccount extends Model
             'is_default' => 'boolean',
             'last_synced_at' => 'datetime',
         ];
-    }
-
-    /**
-     * @return BelongsTo<User, $this>
-     */
-    public function user(): BelongsTo
-    {
-        return $this->belongsTo(User::class);
     }
 
     /**
@@ -128,14 +124,6 @@ class TradingAccount extends Model
             ->oldest('taken_at')
             ->oldest('id')
             ->first();
-    }
-
-    /**
-     * @return BelongsToMany<AiAgent, $this>
-     */
-    public function aiAgents(): BelongsToMany
-    {
-        return $this->belongsToMany(AiAgent::class);
     }
 
     public function isLive(): bool

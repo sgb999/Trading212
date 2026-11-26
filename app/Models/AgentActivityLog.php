@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Traits\BelongsToTradingAccountTrait;
 use Database\Factories\AgentActivityLogFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -14,6 +15,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 #[Fillable(['ai_agent_id', 'trading_account_id', 'tool', 'arguments', 'outcome', 'message'])]
 class AgentActivityLog extends Model
 {
+    use BelongsToTradingAccountTrait;
+
     /** @use HasFactory<AgentActivityLogFactory> */
     use HasFactory;
 
@@ -39,13 +42,5 @@ class AgentActivityLog extends Model
     public function aiAgent(): BelongsTo
     {
         return $this->belongsTo(AiAgent::class);
-    }
-
-    /**
-     * @return BelongsTo<TradingAccount, $this>
-     */
-    public function tradingAccount(): BelongsTo
-    {
-        return $this->belongsTo(TradingAccount::class);
     }
 }

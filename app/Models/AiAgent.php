@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Enums\Permission;
+use App\Traits\BelongsToUserTrait;
 use Database\Factories\AiAgentFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
@@ -21,6 +22,8 @@ use Illuminate\Support\Str;
 #[Hidden(['token_hash'])]
 class AiAgent extends Model
 {
+    use BelongsToUserTrait;
+
     /** @use HasFactory<AiAgentFactory> */
     use HasFactory;
 
@@ -35,14 +38,6 @@ class AiAgent extends Model
             'is_active' => 'boolean',
             'last_used_at' => 'datetime',
         ];
-    }
-
-    /**
-     * @return BelongsTo<User, $this>
-     */
-    public function user(): BelongsTo
-    {
-        return $this->belongsTo(User::class);
     }
 
     /**

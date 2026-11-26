@@ -6,11 +6,11 @@ use App\Enums\OrderSide;
 use App\Enums\OrderType;
 use App\Enums\TimeValidity;
 use App\Enums\TradeOrderStatus;
+use App\Traits\BelongsToTradingAccountTrait;
 use Database\Factories\TradeOrderFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 use Illuminate\Support\Facades\DB;
 
@@ -37,6 +37,8 @@ use Illuminate\Support\Facades\DB;
 ])]
 class TradeOrder extends Model
 {
+    use BelongsToTradingAccountTrait;
+
     /** @use HasFactory<TradeOrderFactory> */
     use HasFactory;
 
@@ -56,14 +58,6 @@ class TradeOrder extends Model
             'extended_hours' => 'boolean',
             'response' => 'array',
         ];
-    }
-
-    /**
-     * @return BelongsTo<TradingAccount, $this>
-     */
-    public function tradingAccount(): BelongsTo
-    {
-        return $this->belongsTo(TradingAccount::class);
     }
 
     /**

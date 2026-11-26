@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Actions\RecordPortfolioSnapshot;
+use App\Traits\BelongsToTradingAccountTrait;
 use Carbon\CarbonInterface;
 use Database\Factories\PortfolioSnapshotFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
@@ -10,7 +11,6 @@ use Illuminate\Database\Eloquent\Attributes\Scope;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
  * Point-in-time value of a Trading 212 account, taken from `GET /equity/account/summary`
@@ -44,6 +44,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 ])]
 class PortfolioSnapshot extends Model
 {
+    use BelongsToTradingAccountTrait;
+
     /** @use HasFactory<PortfolioSnapshotFactory> */
     use HasFactory;
 
@@ -63,14 +65,6 @@ class PortfolioSnapshot extends Model
             'invested' => 'decimal:4',
             'taken_at' => 'datetime',
         ];
-    }
-
-    /**
-     * @return BelongsTo<TradingAccount, $this>
-     */
-    public function tradingAccount(): BelongsTo
-    {
-        return $this->belongsTo(TradingAccount::class);
     }
 
     /**
